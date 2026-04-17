@@ -6,10 +6,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v32_7.json"
+STATE_FILE = "growth_state_v32_8.json"
 SCAN_SIZE = 1500
 MAX_WORKERS = 10
-MIN_PRICE = 2.0
+MIN_PRICE = 5.0   # ← ペニー排除
+MIN_VOLUME = 500000  # ← 流動性フィルタ
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # =========================
@@ -30,8 +31,8 @@ class State:
     def save(self):
         try:
             json.dump(self.data, open(STATE_FILE, "w"))
-        except Exception as e:
-            print(f"[STATE SAVE ERROR] {e}")
+        except:
+            pass
 
     def update(self, ticker, score):
         if not np.isfinite(score):
@@ -39,6 +40,15 @@ class State:
         hist = self.data.get(ticker, [])
         hist.append({"t": time.time(), "s": float(score)})
         self.data[ticker] = hist[-30:]
+
+# =========================
+# UTILS
+# =========================
+def clip(x, cap=3.0):
+    return min(x, cap)
+
+def log_ret(x):
+    return np.log1p(max(x, 0))
 
 # =========================
 # UNIVERSE
@@ -81,7 +91,10 @@ def fetch(session, ticker):
         r = session.get(url, timeout=5).json()
         res = r["chart"]["result"][0]
 
-        close = [c for c in res["indicators"]["quote"][0]["close"] if c is not None]
+        quote = res["indicators"]["quote"][0]
+        close = [c for c in quote["close"] if c is not None]
+        volume = [v for v in quote["volume"] if v is not None]
+
         if len(close) < 120:
             return None
 
@@ -89,12 +102,22 @@ def fetch(session, ticker):
         if price < MIN_PRICE:
             return None
 
+        # 出来高フィルタ
+        avg_vol = np.mean(volume[-10:])
+        if avg_vol < MIN_VOLUME:
+            return None
+
         def ret(a, b):
             return (a / b - 1) if b > 0 else 0
 
-        m6 = ret(price, close[-120])
-        m3 = ret(price, close[-63])
-        m1 = ret(price, close[-21])
+        m6 = clip(ret(price, close[-120]))
+        m3 = clip(ret(price, close[-63]))
+        m1 = clip(ret(price, close[-21]))
+
+        # log圧縮
+        m6 = log_ret(m6)
+        m3 = log_ret(m3)
+        m1 = log_ret(m1)
 
         ma10 = np.mean(close[-10:])
         ma30 = np.mean(close[-30:])
@@ -112,14 +135,15 @@ def fetch(session, ticker):
             "m3": m3,
             "m1": m1,
             "trend": trend,
-            "accel": accel
+            "accel": accel,
+            "vol": avg_vol
         }
 
     except:
         return None
 
 # =========================
-# DETECTOR（絶対スコア版）
+# DETECTOR
 # =========================
 def detect(df):
     early = []
@@ -127,23 +151,20 @@ def detect(df):
     strong = []
 
     for _, r in df.iterrows():
-        raw = r["raw_score"]
+        s = r["score"]
 
-        # 初動（軽め）
-        if raw > 0.15 and r["m1"] > 0:
+        if s > 0.10 and r["m1"] > 0:
             early.append(r)
 
-        # 中核
-        if raw > 0.25 and r["m3"] > 0:
+        if s > 0.20 and r["m3"] > 0:
             expansion.append(r)
 
-        # 本命（かなり厳選）
-        if raw > 0.4 and r["m6"] > 0:
+        if s > 0.30 and r["m6"] > 0:
             strong.append(r)
 
-    early = sorted(early, key=lambda x: x["raw_score"], reverse=True)
-    expansion = sorted(expansion, key=lambda x: x["raw_score"], reverse=True)
-    strong = sorted(strong, key=lambda x: x["raw_score"], reverse=True)
+    early = sorted(early, key=lambda x: x["score"], reverse=True)
+    expansion = sorted(expansion, key=lambda x: x["score"], reverse=True)
+    strong = sorted(strong, key=lambda x: x["score"], reverse=True)
 
     return early, expansion, strong
 
@@ -154,7 +175,7 @@ def report(early, expansion, strong, scanned, valid):
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v32.7",
+        f"🚀 GrowthRadar v32.8",
         f"Scanned:{scanned} Valid:{valid}",
         f"EARLY:{len(early)} EXP:{len(expansion)} STRONG:{len(strong)}",
         f"Time:{now}",
@@ -163,15 +184,15 @@ def report(early, expansion, strong, scanned, valid):
 
     msg.append("🔥 EARLY")
     for c in early[:10]:
-        msg.append(f"{c['ticker']} S:{c['raw_score']:.2f} M1:{c['m1']:.2f}")
+        msg.append(f"{c['ticker']} S:{c['score']:.2f} M1:{c['m1']:.2f}")
 
     msg.append("\n🚀 EXPANSION")
     for c in expansion[:10]:
-        msg.append(f"{c['ticker']} S:{c['raw_score']:.2f} M3:{c['m3']:.2f}")
+        msg.append(f"{c['ticker']} S:{c['score']:.2f} M3:{c['m3']:.2f}")
 
     msg.append("\n💎 STRONG")
     for c in strong[:10]:
-        msg.append(f"{c['ticker']} S:{c['raw_score']:.2f} M6:{c['m6']:.2f}")
+        msg.append(f"{c['ticker']} S:{c['score']:.2f} M6:{c['m6']:.2f}")
 
     text = "\n".join(msg)
     print(text)
@@ -208,15 +229,8 @@ def run():
 
     df = pd.DataFrame(raw)
 
-    # スコア保持（重要）
-    df["raw_score"] = df["score"]
-
-    # 参考用ランキング
-    df["rank_score"] = df["score"].rank(pct=True)
-
-    # state更新（将来用）
     for _, r in df.iterrows():
-        state.update(r["ticker"], r["rank_score"])
+        state.update(r["ticker"], r["score"])
     state.save()
 
     early, expansion, strong = detect(df)
