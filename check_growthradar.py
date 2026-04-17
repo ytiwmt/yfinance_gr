@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v32_10.json"
+STATE_FILE = "growth_state_v32_11.json"
 SCAN_SIZE = 1500
 MAX_WORKERS = 10
 MIN_PRICE = 5.0
@@ -56,7 +56,7 @@ def log_ret(x):
 
 def send_chunks(text):
     if not WEBHOOK_URL:
-        print("[WEBHOOK] SKIPPED (no URL)")
+        print("[WEBHOOK] SKIPPED")
         return
 
     chunk_size = 1800
@@ -69,7 +69,6 @@ def send_chunks(text):
 
             if res.status_code == 429:
                 retry = res.json().get("retry_after", 1)
-                print(f"[RATE LIMIT] sleep {retry}")
                 time.sleep(retry)
             else:
                 time.sleep(1.2)
@@ -133,6 +132,13 @@ def fetch(session, ticker):
         if avg_vol < MIN_VOLUME:
             return None
 
+        # ★ 資金流入フィルタ（重要）
+        vol_recent = np.mean(volume[-5:])
+        vol_past = np.mean(volume[-20:-5])
+
+        if vol_recent < vol_past * 1.5:
+            return None
+
         def ret(a, b):
             return (a / b - 1) if b > 0 else 0
 
@@ -170,8 +176,10 @@ def detect(df):
 
         if s > 0.10 and r["m1"] > 0:
             early.append(r)
+
         if s > 0.20 and r["m3"] > 0:
             expansion.append(r)
+
         if s > 0.30 and r["m6"] > 0:
             strong.append(r)
 
@@ -188,7 +196,7 @@ def report(early, expansion, strong, scanned, valid):
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v32.10",
+        f"🚀 GrowthRadar v32.11",
         f"Scanned:{scanned} Valid:{valid}",
         f"EARLY:{len(early)} EXP:{len(expansion)} STRONG:{len(strong)}",
         f"Time:{now}",
