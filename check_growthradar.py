@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v32_13.json"
+STATE_FILE = "growth_state_v32_14.json"
 SCAN_SIZE = 1500
 MAX_WORKERS = 10
 MIN_PRICE = 5.0
@@ -149,14 +149,26 @@ def fetch(session, ticker):
         ):
             return None
 
-        # ★ ドローダウン耐性（最終）
+        # ★ ドローダウン耐性
         recent_min = min(close[-10:])
         dd = (price / recent_min - 1)
-
         if dd < 0.05:
             return None
 
-        # スコア用
+        # ★ 軽量VCP（追加）
+        diffs_recent = [abs(close[i] - close[i-1]) for i in range(-5, 0)]
+        diffs_past = [abs(close[i] - close[i-1]) for i in range(-20, -5)]
+
+        if len(diffs_past) > 0:
+            range_recent = np.mean(diffs_recent)
+            range_past = np.mean(diffs_past)
+
+            if range_past > 0:
+                vcp = range_recent / range_past
+                if vcp > 0.9:
+                    return None
+
+        # スコア
         m6 = log_ret(clip(m6_raw))
         m3 = log_ret(clip(m3_raw))
         m1 = log_ret(clip(m1_raw))
@@ -222,7 +234,7 @@ def report(early, expansion, strong, scanned, valid):
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v32.13",
+        f"🚀 GrowthRadar v32.14",
         f"Scanned:{scanned} Valid:{valid}",
         f"EARLY:{len(early)} EXP:{len(expansion)} STRONG:{len(strong)}",
         f"Time:{now}",
