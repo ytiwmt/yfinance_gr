@@ -6,14 +6,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v32_9.json"
+STATE_FILE = "growth_state_v32_10.json"
 SCAN_SIZE = 1500
 MAX_WORKERS = 10
 MIN_PRICE = 5.0
 MIN_VOLUME = 500000
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# 表示件数（←ここで制御）
 TOP_EARLY = 5
 TOP_EXP = 5
 TOP_STRONG = 5
@@ -57,14 +56,26 @@ def log_ret(x):
 
 def send_chunks(text):
     if not WEBHOOK_URL:
+        print("[WEBHOOK] SKIPPED (no URL)")
         return
+
     chunk_size = 1800
-    for i in range(0, len(text), chunk_size):
-        chunk = text[i:i+chunk_size]
+    chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+
+    for i, chunk in enumerate(chunks):
         try:
-            requests.post(WEBHOOK_URL, json={"content": chunk})
-        except:
-            pass
+            res = requests.post(WEBHOOK_URL, json={"content": chunk})
+            print(f"[WEBHOOK {i+1}/{len(chunks)}] {res.status_code}")
+
+            if res.status_code == 429:
+                retry = res.json().get("retry_after", 1)
+                print(f"[RATE LIMIT] sleep {retry}")
+                time.sleep(retry)
+            else:
+                time.sleep(1.2)
+
+        except Exception as e:
+            print("[WEBHOOK ERROR]", e)
 
 # =========================
 # UNIVERSE
@@ -177,7 +188,7 @@ def report(early, expansion, strong, scanned, valid):
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v32.9",
+        f"🚀 GrowthRadar v32.10",
         f"Scanned:{scanned} Valid:{valid}",
         f"EARLY:{len(early)} EXP:{len(expansion)} STRONG:{len(strong)}",
         f"Time:{now}",
