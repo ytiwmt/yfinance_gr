@@ -1,9 +1,13 @@
 name: GrowthRadar Test
 
 on:
-  workflow_dispatch:  # 手動実行（これがメイン）
+  workflow_dispatch:
   push:
     branches: [ main ]
+  schedule:
+    - cron: "0 0 * * *"   # 09:00 JST
+    - cron: "0 6 * * *"   # 15:00 JST
+    - cron: "0 12 * * *"  # 21:00 JST
 
 jobs:
   run-scan:
