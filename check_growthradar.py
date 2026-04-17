@@ -6,15 +6,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v32_8.json"
+STATE_FILE = "growth_state_v32_9.json"
 SCAN_SIZE = 1500
 MAX_WORKERS = 10
-MIN_PRICE = 5.0   # ← ペニー排除
-MIN_VOLUME = 500000  # ← 流動性フィルタ
+MIN_PRICE = 5.0
+MIN_VOLUME = 500000
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
+# 表示件数（←ここで制御）
+TOP_EARLY = 5
+TOP_EXP = 5
+TOP_STRONG = 5
+
 # =========================
-# STATE（将来用）
+# STATE
 # =========================
 class State:
     def __init__(self):
@@ -49,6 +54,17 @@ def clip(x, cap=3.0):
 
 def log_ret(x):
     return np.log1p(max(x, 0))
+
+def send_chunks(text):
+    if not WEBHOOK_URL:
+        return
+    chunk_size = 1800
+    for i in range(0, len(text), chunk_size):
+        chunk = text[i:i+chunk_size]
+        try:
+            requests.post(WEBHOOK_URL, json={"content": chunk})
+        except:
+            pass
 
 # =========================
 # UNIVERSE
@@ -102,7 +118,6 @@ def fetch(session, ticker):
         if price < MIN_PRICE:
             return None
 
-        # 出来高フィルタ
         avg_vol = np.mean(volume[-10:])
         if avg_vol < MIN_VOLUME:
             return None
@@ -110,14 +125,9 @@ def fetch(session, ticker):
         def ret(a, b):
             return (a / b - 1) if b > 0 else 0
 
-        m6 = clip(ret(price, close[-120]))
-        m3 = clip(ret(price, close[-63]))
-        m1 = clip(ret(price, close[-21]))
-
-        # log圧縮
-        m6 = log_ret(m6)
-        m3 = log_ret(m3)
-        m1 = log_ret(m1)
+        m6 = log_ret(clip(ret(price, close[-120])))
+        m3 = log_ret(clip(ret(price, close[-63])))
+        m1 = log_ret(clip(ret(price, close[-21])))
 
         ma10 = np.mean(close[-10:])
         ma30 = np.mean(close[-30:])
@@ -130,35 +140,27 @@ def fetch(session, ticker):
         return {
             "ticker": ticker,
             "score": score,
-            "price": price,
             "m6": m6,
             "m3": m3,
-            "m1": m1,
-            "trend": trend,
-            "accel": accel,
-            "vol": avg_vol
+            "m1": m1
         }
 
     except:
         return None
 
 # =========================
-# DETECTOR
+# DETECT
 # =========================
 def detect(df):
-    early = []
-    expansion = []
-    strong = []
+    early, expansion, strong = [], [], []
 
     for _, r in df.iterrows():
         s = r["score"]
 
         if s > 0.10 and r["m1"] > 0:
             early.append(r)
-
         if s > 0.20 and r["m3"] > 0:
             expansion.append(r)
-
         if s > 0.30 and r["m6"] > 0:
             strong.append(r)
 
@@ -175,7 +177,7 @@ def report(early, expansion, strong, scanned, valid):
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v32.8",
+        f"🚀 GrowthRadar v32.9",
         f"Scanned:{scanned} Valid:{valid}",
         f"EARLY:{len(early)} EXP:{len(expansion)} STRONG:{len(strong)}",
         f"Time:{now}",
@@ -183,25 +185,21 @@ def report(early, expansion, strong, scanned, valid):
     ]
 
     msg.append("🔥 EARLY")
-    for c in early[:10]:
-        msg.append(f"{c['ticker']} S:{c['score']:.2f} M1:{c['m1']:.2f}")
+    for c in early[:TOP_EARLY]:
+        msg.append(f"{c['ticker']} S:{c['score']:.2f}")
 
     msg.append("\n🚀 EXPANSION")
-    for c in expansion[:10]:
-        msg.append(f"{c['ticker']} S:{c['score']:.2f} M3:{c['m3']:.2f}")
+    for c in expansion[:TOP_EXP]:
+        msg.append(f"{c['ticker']} S:{c['score']:.2f}")
 
     msg.append("\n💎 STRONG")
-    for c in strong[:10]:
-        msg.append(f"{c['ticker']} S:{c['score']:.2f} M6:{c['m6']:.2f}")
+    for c in strong[:TOP_STRONG]:
+        msg.append(f"{c['ticker']} S:{c['score']:.2f}")
 
     text = "\n".join(msg)
     print(text)
 
-    if WEBHOOK_URL:
-        try:
-            requests.post(WEBHOOK_URL, json={"content": text[:1900]})
-        except:
-            pass
+    send_chunks(text)
 
 # =========================
 # MAIN
