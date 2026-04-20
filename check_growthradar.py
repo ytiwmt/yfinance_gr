@@ -6,7 +6,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v32_18.json"
+STATE_FILE = "growth_state_v32_19.json"
+UNIVERSE_FILE = "universe_cache.json"
+
 SCAN_SIZE = 1500
 MAX_WORKERS = 12
 MIN_PRICE = 5.0
@@ -37,18 +39,16 @@ class State:
             pass
 
     def update(self, ticker, score):
-        if not np.isfinite(score):
-            return
         hist = self.data.get(ticker, [])
         hist.append({"t": time.time(), "s": float(score)})
         self.data[ticker] = hist[-30:]
 
     def get_velocity(self, ticker):
         hist = self.data.get(ticker, [])
-        if len(hist) < 3:
+        if len(hist) < 5:
             return 0.0
 
-        prev = hist[-3]["s"]
+        prev = hist[-5]["s"]
         curr = hist[-1]["s"]
 
         if abs(prev) < 1e-6:
@@ -57,10 +57,49 @@ class State:
         return (curr - prev) / abs(prev)
 
 # =========================
+# UNIVERSE（固定化）
+# =========================
+def load_universe():
+    if os.path.exists(UNIVERSE_FILE):
+        try:
+            return json.load(open(UNIVERSE_FILE))
+        except:
+            pass
+
+    symbols = []
+
+    try:
+        df = pd.read_csv("https://datahub.io/core/nasdaq-listings/r/nasdaq-listed-symbols.csv")
+        symbols += df["Symbol"].tolist()
+    except:
+        pass
+
+    try:
+        txt = requests.get(
+            "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all_tickers.txt",
+            timeout=10
+        ).text.split("\n")
+        symbols += txt
+    except:
+        pass
+
+    clean = list(set([
+        s.strip().upper()
+        for s in symbols
+        if isinstance(s, str) and re.match(r"^[A-Z]{1,5}$", s)
+    ]))
+
+    random.shuffle(clean)
+    universe = clean[:SCAN_SIZE]
+
+    json.dump(universe, open(UNIVERSE_FILE, "w"))
+    return universe
+
+# =========================
 # FETCH
 # =========================
 def fetch(session, ticker):
-    for attempt in range(2):
+    for _ in range(2):
         try:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1y&interval=1d"
             r = session.get(url, timeout=5)
@@ -77,15 +116,15 @@ def fetch(session, ticker):
             v = [x for x in q["volume"] if x is not None]
 
             if len(c) < 120 or len(v) < 120:
-                return None
+                return ticker, 0.0, None
 
             price = c[-1]
             if price < MIN_PRICE:
-                return None
+                return ticker, 0.0, None
 
             avg_vol = np.mean(v[-10:])
             if avg_vol < MIN_VOLUME:
-                return None
+                return ticker, 0.0, None
 
             def ret(a, b):
                 return (a / b - 1) if b > 0 else 0
@@ -94,25 +133,21 @@ def fetch(session, ticker):
             m3_raw = ret(price, c[-63])
             m1_raw = ret(price, c[-21])
 
-            # 出来高 or トレンド
             vol_recent = np.mean(v[-5:])
             vol_past = np.mean(v[-20:-5])
 
             if not (vol_recent > vol_past * 1.5 or m3_raw > 0.4):
-                return None
+                return ticker, 0.0, None
 
-            # 押し目の質
             if (price / min(c[-10:]) - 1) < 0.05:
-                return None
+                return ticker, 0.0, None
 
-            # 過熱フィルタ（修正版）
             ema20 = pd.Series(c).ewm(span=20).mean().iloc[-1]
             overheat = (price / ema20 - 1)
 
             if overheat > 0.45 and m3_raw < 0.8:
-                return None
+                return ticker, 0.0, None
 
-            # スコア
             def log_ret(x):
                 return np.log1p(max(min(x, 3.0), 0))
 
@@ -125,7 +160,7 @@ def fetch(session, ticker):
 
             score = (0.3 * m6) + (0.3 * trend) + (0.4 * accel)
 
-            return {
+            return ticker, score, {
                 "ticker": ticker,
                 "score": score,
                 "m1": m1,
@@ -137,37 +172,7 @@ def fetch(session, ticker):
         except:
             time.sleep(0.5)
 
-    return None
-
-# =========================
-# UNIVERSE
-# =========================
-def load_universe():
-    symbols = []
-
-    sources = [
-        "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all_tickers.txt",
-        "https://datahub.io/core/nasdaq-listings/r/nasdaq-listed-symbols.csv"
-    ]
-
-    for url in sources:
-        try:
-            res = requests.get(url, timeout=10)
-            if "csv" in url:
-                symbols += pd.read_csv(url)["Symbol"].tolist()
-            else:
-                symbols += res.text.split("\n")
-        except:
-            pass
-
-    clean = list(set([
-        s.strip().upper()
-        for s in symbols
-        if isinstance(s, str) and re.match(r"^[A-Z]{1,5}$", s)
-    ]))
-
-    random.shuffle(clean)
-    return clean[:SCAN_SIZE]
+    return ticker, 0.0, None
 
 # =========================
 # MAIN
@@ -179,16 +184,21 @@ def run():
     state = State()
     universe = load_universe()
 
-    print(f"🚀 GrowthRadar v32.18 | Scanning {len(universe)} stocks...")
+    print(f"🚀 GrowthRadar v32.19 | Scanning {len(universe)}")
 
     results = []
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(fetch, session, t): t for t in universe}
+
         for f in as_completed(futures):
-            res = f.result()
+            ticker, score, res = f.result()
+
+            # ★全銘柄state更新（最重要）
+            state.update(ticker, score)
+
             if res:
                 results.append(res)
-                state.update(res["ticker"], res["score"])
 
     state.save()
 
@@ -205,7 +215,7 @@ def run():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v32.18",
+        f"🚀 GrowthRadar v32.19",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         ""
@@ -217,12 +227,13 @@ def run():
         ("STRONG", strong, "💎")
     ]:
         msg.append(f"{icon} {name}:{len(data)}")
+
         for _, r in data.head(5).iterrows():
             v = state.get_velocity(r['ticker'])
 
             status = (
-                "NEW!!" if v > 0.25 else
-                "RISING" if v > 0.10 else
+                "NEW!!" if v > 0.30 else
+                "RISING" if v > 0.15 else
                 "KEEP" if v > -0.05 else
                 "WEAK"
             )
