@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v32_26.json"
+STATE_FILE = "growth_state_v33.json"
 
 SCAN_SIZE = 1500
 MAX_WORKERS = 12
@@ -14,9 +14,11 @@ MAX_WORKERS = 12
 MIN_PRICE = 5.0
 MIN_VOLUME = 500000
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+# ユニバース安定比率（ここが重要）
+STABLE_RATIO = 0.8   # 80%固定
+RANDOM_RATIO = 0.2   # 20%探索
 
 # =========================
 # STATE
@@ -41,71 +43,62 @@ class State:
         except:
             pass
 
-    def update(self, ticker, score, rank):
-        if not np.isfinite(score):
-            return
-
+    def update(self, ticker, score):
         hist = self.data.get(ticker, [])
-        hist.append({
-            "t": time.time(),
-            "s": float(score),
-            "r": int(rank)
-        })
+        hist.append({"t": time.time(), "s": float(score)})
         self.data[ticker] = hist[-30:]
 
-    def rank_velocity(self, ticker, current_rank):
+    def get_velocity(self, ticker):
         hist = self.data.get(ticker, [])
         if len(hist) < 3:
             return 0.0
-
-        prev = hist[-3]["r"]
-        return prev - current_rank
+        return hist[-1]["s"] - hist[-3]["s"]
 
 # =========================
-# UNIVERSE（完全復旧版）
+# UNIVERSE（重要改善）
 # =========================
 def load_universe():
     symbols = []
 
-    # GitHub
-    try:
-        txt = requests.get(
-            "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all_tickers.txt",
-            timeout=10
-        ).text.split("\n")
-        symbols += txt
-    except:
-        print("[WARN] GitHub failed")
-
-    # NASDAQ fallback
+    # NASDAQ
     try:
         df = pd.read_csv(
             "https://datahub.io/core/nasdaq-listings/r/nasdaq-listed-symbols.csv"
         )
         symbols += df["Symbol"].tolist()
     except:
-        print("[WARN] NASDAQ CSV failed")
+        pass
 
-    clean = []
-    for s in symbols:
-        if not isinstance(s, str):
-            continue
+    # GitHub
+    try:
+        txt = requests.get(
+            "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all_tickers.txt",
+            timeout=10
+        ).text.splitlines()
+        symbols += txt
+    except:
+        pass
 
-        s = s.strip().upper()
+    clean = list(set([
+        s.strip().upper()
+        for s in symbols
+        if isinstance(s, str) and re.match(r"^[A-Z]{1,5}$", s)
+    ]))
 
-        # ★緩和（ここ重要）
-        if re.match(r"^[A-Z0-9\.\-]{1,6}$", s):
-            clean.append(s)
+    clean.sort()  # ★重要：固定ベース
 
-    clean = list(set(clean))
+    # =========================
+    # ハイブリッドサンプリング
+    # =========================
+    stable_size = int(len(clean) * STABLE_RATIO)
+    stable = clean[:stable_size]
 
-    if len(clean) == 0:
-        # ★絶対死なない保険
-        clean = ["AAPL", "NVDA", "MSFT", "AMD", "TSLA", "AMZN"]
+    random_pool = clean[stable_size:]
+    random_sample = random.sample(random_pool, min(len(random_pool), SCAN_SIZE - stable_size))
 
-    random.shuffle(clean)
+    universe = stable[:SCAN_SIZE - len(random_sample)] + random_sample
 
-    return clean[:SCAN_SIZE]
+    return universe[:SCAN_SIZE]
 
 # =========================
 # FETCH
@@ -119,13 +112,16 @@ def fetch(session, ticker):
             return None
 
         data = r.json()
+        if "chart" not in data or not data["chart"]["result"]:
+            return None
+
         res = data["chart"]["result"][0]
         q = res["indicators"]["quote"][0]
 
         c = [x for x in q["close"] if x is not None]
         v = [x for x in q["volume"] if x is not None]
 
-        if len(c) < 120 or len(v) < 120:
+        if len(c) < 120:
             return None
 
         price = c[-1]
@@ -146,82 +142,58 @@ def fetch(session, ticker):
         vol_recent = np.mean(v[-5:])
         vol_past = np.mean(v[-20:-5])
 
-        if not (vol_recent > vol_past * 1.2 or m3 > 0.4):
+        # 初動 or トレンド継続
+        if not (vol_recent > vol_past * 1.5 or m3 > 0.4):
             return None
 
-        if (price / min(c[-10:]) - 1) < 0.01:
-            return None
-
-        ema20 = pd.Series(c).ewm(span=20).mean().iloc[-1]
-        if (price / ema20 - 1) > 0.35:
+        # 押し目制御
+        if (price / min(c[-10:]) - 1) < 0.03:
             return None
 
         def log(x):
-            return np.log1p(max(min(x, 3.0), 0))
+            return np.log1p(max(min(x, 3), 0))
 
-        score = (
-            0.3 * log(m6) +
-            0.3 * ret(np.mean(c[-10:]), np.mean(c[-30:])) +
-            0.4 * (log(m1) - log(m3 / 3))
-        )
+        m6, m3, m1 = log(m6), log(m3), log(m1)
+
+        trend = ret(np.mean(c[-10:]), np.mean(c[-30:]))
+        accel = m1 - (m3 / 3)
+
+        score = (0.3 * m6) + (0.3 * trend) + (0.4 * accel)
 
         return {
             "ticker": ticker,
-            "score": score
+            "score": score,
+            "m1": m1,
+            "m3": m3,
+            "m6": m6,
+            "accel": accel
         }
 
     except:
         return None
 
 # =========================
-# CLASSIFY
-# =========================
-def classify(df):
-    df = df.sort_values("score", ascending=False).reset_index(drop=True)
-    df["rank"] = df.index + 1
-
-    early = df[df["score"] > 0.15]
-    exp = df[df["score"] > 0.25]
-    strong = df[df["score"] > 0.35]
-
-    return early, exp, strong
-
-# =========================
-# STATUS
-# =========================
-def status(rank_change):
-    if rank_change >= 15:
-        return "NEW!!"
-    elif rank_change >= 5:
-        return "RISING"
-    elif rank_change >= -5:
-        return "KEEP"
-    else:
-        return "DROP"
-
-# =========================
-# MAIN
+# RUN
 # =========================
 def run():
     session = requests.Session()
     session.headers.update(HEADERS)
-    state = State()
 
+    state = State()
     universe = load_universe()
 
-    print(f"🚀 GrowthRadar v32.26 | Universe: {len(universe)}")
+    print(f"Scanning {len(universe)} tickers...")
 
     results = []
-
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(fetch, session, t): t for t in universe}
-
         for f in as_completed(futures):
-            res = f.result()
-            if res:
-                results.append(res)
+            r = f.result()
+            if r:
+                results.append(r)
+                state.update(r["ticker"], r["score"])
 
-    print(f"VALID: {len(results)}")
+    state.save()
 
     if not results:
         print("NO DATA")
@@ -229,37 +201,25 @@ def run():
 
     df = pd.DataFrame(results)
 
-    early, exp, strong = classify(df)
+    early = df[df["score"] > 0.10].sort_values("score", ascending=False)
+    exp = df[df["score"] > 0.20].sort_values("score", ascending=False)
+    strong = df[df["score"] > 0.30].sort_values("score", ascending=False)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v32.26",
+        f"🚀 GrowthRadar v33",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}\n"
     ]
 
-    for name, data, icon in [
-        ("EARLY", early, "🔥"),
-        ("EXP", exp, "🚀"),
-        ("STRONG", strong, "💎")
-    ]:
-        msg.append(f"{icon} {name}:{len(data)}")
-
-        top = data.head(5)
-
-        for _, r in top.iterrows():
-            ticker = r["ticker"]
-            rank = int(r["rank"])
-
-            v = state.rank_velocity(ticker, rank)
-            state.update(ticker, r["score"], rank)
-
-            msg.append(f"{ticker} S:{r['score']:.2f} [{status(v)}]")
-
+    for name, d in [("EARLY", early), ("EXP", exp), ("STRONG", strong)]:
+        msg.append(f"🔥 {name}")
+        for _, r in d.head(5).iterrows():
+            v = state.get_velocity(r["ticker"])
+            status = "NEW" if v > 0.2 else "KEEP" if v > 0 else "SLOW"
+            msg.append(f"{r['ticker']} S:{r['score']:.2f} [{status}]")
         msg.append("")
-
-    state.save()
 
     text = "\n".join(msg)
     print(text)
