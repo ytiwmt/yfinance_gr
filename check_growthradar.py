@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v32_23.json"
+STATE_FILE = "growth_state_v32_24.json"
 SCAN_SIZE = 1500
 MAX_WORKERS = 12
 MIN_PRICE = 5.0
@@ -43,19 +43,15 @@ class State:
         hist.append({"t": time.time(), "s": float(score)})
         self.data[ticker] = hist[-30:]
 
-    # ★ ハイブリッド変化検知（ここが核心）
-    def get_velocity(self, ticker):
+    def velocity(self, ticker):
         hist = self.data.get(ticker, [])
-        if len(hist) < 5:
+        if len(hist) < 3:
             return 0.0
-
-        scores = [h["s"] for h in hist]
-
-        recent = scores[-1]
-        avg = np.mean(scores[-5:])
-        delta = scores[-1] - scores[-2]
-
-        return (recent - avg) * 0.7 + delta * 0.3
+        prev = hist[-3]["s"]
+        curr = hist[-1]["s"]
+        if abs(prev) < 1e-6:
+            return 0.0
+        return (curr - prev) / abs(prev)
 
 # =========================
 # FETCH
@@ -77,14 +73,15 @@ def fetch(session, ticker):
             c = [x for x in q["close"] if x is not None]
             v = [x for x in q["volume"] if x is not None]
 
-            if len(c) < 120:
+            if len(c) < 120 or len(v) < 120:
                 return None
 
             price = c[-1]
             if price < MIN_PRICE:
                 return None
 
-            if np.mean(v[-10:]) < MIN_VOLUME:
+            avg_vol = np.mean(v[-10:])
+            if avg_vol < MIN_VOLUME:
                 return None
 
             def ret(a, b):
@@ -94,22 +91,23 @@ def fetch(session, ticker):
             m3_raw = ret(price, c[-63])
             m1_raw = ret(price, c[-21])
 
+            # ===== フィルタ緩和（重要） =====
             vol_recent = np.mean(v[-5:])
             vol_past = np.mean(v[-20:-5])
 
-            # 資金 or 強トレンド
-            if not (vol_recent > vol_past * 1.5 or m3_raw > 0.4):
+            if not (vol_recent > vol_past * 1.2 or m3_raw > 0.4):
                 return None
 
-            # 押し目反発
-            if (price / min(c[-10:]) - 1) < 0.03:
+            # 押し目（かなり緩和）
+            if (price / min(c[-10:]) - 1) < 0.01:
                 return None
 
-            # 過熱除外
+            # 過熱緩和
             ema20 = pd.Series(c).ewm(span=20).mean().iloc[-1]
-            if (price / ema20 - 1) > 0.25:
+            if (price / ema20 - 1) > 0.35:
                 return None
 
+            # ===== スコア =====
             def log_ret(x):
                 return np.log1p(max(min(x, 3.0), 0))
 
@@ -133,7 +131,46 @@ def fetch(session, ticker):
 
         except:
             time.sleep(0.5)
+
     return None
+
+# =========================
+# CLASSIFY
+# =========================
+def classify(df):
+    # 初動だけに限定（重要）
+    early = df[
+        (df['m1'] > 0.10) &
+        (df['accel'] > 0.02) &
+        (df['score'] < 0.75)
+    ].sort_values("score", ascending=False)
+
+    expansion = df[
+        (df['score'] > 0.20) &
+        (df['m3'] > 0.2) &
+        (df['accel'] > 0)
+    ].sort_values("score", ascending=False)
+
+    strong = df[
+        (df['score'] > 0.30) &
+        (df['m3'] > 0.4) &
+        (df['m6'] > 0.5)
+    ].sort_values("score", ascending=False)
+
+    return early, expansion, strong
+
+# =========================
+# STATUS
+# =========================
+def status(v):
+    if v > 0.005:
+        return "NEW!!"
+    elif v > 0.001:
+        return "RISING"
+    elif v > -0.002:
+        return "KEEP"
+    else:
+        return "DROP"
 
 # =========================
 # MAIN
@@ -143,21 +180,19 @@ def run():
     session.headers.update(HEADERS)
     state = State()
 
-    # ユニバース
+    # universe
     symbols = []
-    sources = [
-        "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all_tickers.txt",
-        "https://datahub.io/core/nasdaq-listings/r/nasdaq-listed-symbols.csv"
-    ]
+    try:
+        txt = requests.get("https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all_tickers.txt").text.split("\n")
+        symbols += txt
+    except:
+        pass
 
-    for url in sources:
-        try:
-            if "csv" in url:
-                symbols += pd.read_csv(url)["Symbol"].tolist()
-            else:
-                symbols += requests.get(url, timeout=10).text.split("\n")
-        except:
-            pass
+    try:
+        df = pd.read_csv("https://datahub.io/core/nasdaq-listings/r/nasdaq-listed-symbols.csv")
+        symbols += df["Symbol"].tolist()
+    except:
+        pass
 
     clean = list(set([
         s.strip().upper()
@@ -168,16 +203,16 @@ def run():
     random.shuffle(clean)
     universe = clean[:SCAN_SIZE]
 
-    print(f"🚀 GrowthRadar v32.23 | Scan:{len(universe)}")
+    print(f"🚀 GrowthRadar v32.24 | Scanning {len(universe)}")
 
     results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(fetch, session, t): t for t in universe}
         for f in as_completed(futures):
-            r = f.result()
-            if r:
-                results.append(r)
-                state.update(r["ticker"], r["score"])
+            res = f.result()
+            if res:
+                results.append(res)
+                state.update(res["ticker"], res["score"])
 
     state.save()
 
@@ -187,64 +222,32 @@ def run():
 
     df = pd.DataFrame(results)
 
-    # =========================
-    # FILTER（ここ強化）
-    # =========================
+    early, exp, strong = classify(df)
 
-    early = df[
-        (df['m1'] > 0.08) &
-        (df['accel'] > 0.01) &
-        (df['score'] < 0.8)
-    ].sort_values("score", ascending=False)
-
-    exp = df[
-        (df['score'] > 0.20) &
-        (df['m3'] > 0.2) &
-        (df['accel'] > 0)
-    ].sort_values("score", ascending=False)
-
-    strong = df[
-        (df['score'] > 0.30) &
-        (df['m3'] > 0.4) &
-        (df['m6'] > 0.5) &
-        (df['accel'] > 0)
-    ].sort_values("score", ascending=False)
-
-    # =========================
-    # REPORT
-    # =========================
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    def classify(v):
-        if v > 0.008:
-            return "NEW!!"
-        elif v > 0.002:
-            return "RISING"
-        elif v > -0.003:
-            return "KEEP"
-        else:
-            return "DROP"
-
     msg = [
-        f"🚀 GrowthRadar v32.23",
+        f"🚀 GrowthRadar v32.24",
         f"Scan:{len(universe)} Valid:{len(df)}",
-        f"Time:{now}",
-        ""
+        f"Time:{now}\n"
     ]
 
-    for name, d, icon in [("EARLY", early, "🔥"), ("EXP", exp, "🚀"), ("STRONG", strong, "💎")]:
-        msg.append(f"{icon} {name}:{len(d)}")
-        for _, r in d.head(5).iterrows():
-            v = state.get_velocity(r['ticker'])
-            status = classify(v)
-            msg.append(f"{r['ticker']} S:{r['score']:.2f} [{status}]")
+    for name, data, icon in [
+        ("EARLY", early, "🔥"),
+        ("EXP", exp, "🚀"),
+        ("STRONG", strong, "💎")
+    ]:
+        msg.append(f"{icon} {name}:{len(data)}")
+        for _, r in data.head(5).iterrows():
+            v = state.velocity(r['ticker'])
+            msg.append(f"{r['ticker']} S:{r['score']:.2f} [{status(v)}]")
         msg.append("")
 
-    report = "\n".join(msg)
-    print(report)
+    text = "\n".join(msg)
+    print(text)
 
     if WEBHOOK_URL:
-        requests.post(WEBHOOK_URL, json={"content": report[:1900]})
+        requests.post(WEBHOOK_URL, json={"content": text[:1900]})
 
 
 if __name__ == "__main__":
