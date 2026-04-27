@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v33_3.json"
+STATE_FILE = "growth_state_v33_4.json"
 
 SCAN_SIZE = 1500
 MAX_WORKERS = 12
@@ -15,13 +15,6 @@ MIN_PRICE = 5.0
 MIN_VOLUME = 500000
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
-
-# セクター制御（疑似分類）
-SECTOR_MAP = {
-    "AI": ["NVDA", "AMD", "SMCI", "AVGO"],
-    "BIOTECH": ["AEHR", "CLYM", "TNGX", "ERAS"],
-    "SEMICON": ["INTC", "TSM", "AMKR", "AXTI"],
-}
 
 # =========================
 # STATE
@@ -49,7 +42,7 @@ class State:
     def update(self, ticker, score):
         hist = self.data.get(ticker, [])
         hist.append({"t": time.time(), "s": float(score)})
-        self.data[ticker] = hist[-30:]
+        self.data[ticker] = hist[-40:]
 
     def velocity(self, ticker):
         h = self.data.get(ticker, [])
@@ -116,64 +109,53 @@ def fetch(session, ticker):
 
         vol_ratio = np.mean(v[-5:]) / (np.mean(v[-20:-5]) + 1e-9)
 
-        if not (vol_ratio > 1.4 or m3 > 0.35):
-            return None
-
-        # 初動検知（重要）
-        breakout = price / max(c[-20:]) - 1
-
-        if breakout < 0.02:
-            return None
-
-        # スコア（相対化）
-        score = (
-            np.tanh(m1 * 3) * 0.4 +
-            np.tanh(m3 * 2) * 0.3 +
-            np.tanh(m6) * 0.2 +
-            np.tanh(vol_ratio - 1) * 0.1
+        # =========================
+        # ① トレンド評価（長期軸）
+        # =========================
+        trend_score = (
+            np.tanh(m6) * 0.5 +
+            np.tanh(m3) * 0.3 +
+            np.tanh(m1) * 0.2
         )
+
+        # =========================
+        # ② 初動評価（完全別枠）
+        # =========================
+        breakout = price / max(c[-20:]) - 1
+        flow = np.tanh(vol_ratio - 1)
+
+        early_score = breakout * 0.6 + flow * 0.4
+
+        # フィルタ（初動だけは弱めに残す）
+        if trend_score < 0.05 and early_score < 0.05:
+            return None
 
         return {
             "ticker": ticker,
-            "score": float(score),
+            "trend": float(trend_score),
+            "early": float(early_score),
             "m1": m1,
             "m3": m3,
-            "m6": m6,
-            "vol": vol_ratio,
-            "breakout": breakout
+            "m6": m6
         }
 
     except:
         return None
 
 # =========================
-# SECTOR DIVERSITY FILTER
+# CLASSIFY
 # =========================
-def diversify(df):
-    selected = []
-    used = set()
+def classify(df):
+    # EARLY = 初動だけ
+    early = df[df["early"] > 0.15].sort_values("early", ascending=False)
 
-    for _, r in df.sort_values("score", ascending=False).iterrows():
-        ticker = r["ticker"]
+    # EXP = トレンド + 初動混合
+    exp = df[(df["trend"] > 0.25) & (df["early"] > 0.10)]
 
-        sector = None
-        for k, v in SECTOR_MAP.items():
-            if ticker in v:
-                sector = k
+    # STRONG = トレンド支配
+    strong = df[df["trend"] > 0.45]
 
-        if sector is None:
-            sector = "OTHER"
-
-        if used.count(sector) >= 2:
-            continue
-
-        selected.append(r)
-        used.add(sector)
-
-        if len(selected) >= 20:
-            break
-
-    return pd.DataFrame(selected)
+    return early, exp, strong
 
 # =========================
 # RUN
@@ -195,7 +177,7 @@ def run():
             r = f.result()
             if r:
                 results.append(r)
-                state.update(r["ticker"], r["score"])
+                state.update(r["ticker"], r["trend"] + r["early"])
 
     state.save()
 
@@ -205,20 +187,12 @@ def run():
 
     df = pd.DataFrame(results)
 
-    # フェーズ
-    early = df[df["score"] > 0.25]
-    exp = df[df["score"] > 0.40]
-    strong = df[df["score"] > 0.55]
-
-    # 分散適用
-    early = diversify(early)
-    exp = diversify(exp)
-    strong = diversify(strong)
+    early, exp, strong = classify(df)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v33.3",
+        "🚀 GrowthRadar v33.4",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}\n"
     ]
@@ -227,9 +201,11 @@ def run():
         msg.append(f"🔥 {name}:{len(d)}")
 
         for _, r in d.head(5).iterrows():
-            v = state.velocity(r["ticker"])
-            status = "NEW" if v > 0.2 else "RISING" if v > 0 else "SLOW"
-            msg.append(f"{r['ticker']} S:{r['score']:.2f} [{status}]")
+            msg.append(
+                f"{r['ticker']} "
+                f"TR:{r['trend']:.2f} "
+                f"ER:{r['early']:.2f}"
+            )
 
         msg.append("")
 
