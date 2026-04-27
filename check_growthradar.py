@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v33_1.json"
+STATE_FILE = "growth_state_v33_3.json"
 
 SCAN_SIZE = 1500
 MAX_WORKERS = 12
@@ -16,8 +16,12 @@ MIN_VOLUME = 500000
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-STABLE_RATIO = 0.8
-RANDOM_RATIO = 0.2
+# セクター制御（疑似分類）
+SECTOR_MAP = {
+    "AI": ["NVDA", "AMD", "SMCI", "AVGO"],
+    "BIOTECH": ["AEHR", "CLYM", "TNGX", "ERAS"],
+    "SEMICON": ["INTC", "TSM", "AMKR", "AXTI"],
+}
 
 # =========================
 # STATE
@@ -43,70 +47,36 @@ class State:
             pass
 
     def update(self, ticker, score):
-        if not np.isfinite(score):
-            return
         hist = self.data.get(ticker, [])
         hist.append({"t": time.time(), "s": float(score)})
         self.data[ticker] = hist[-30:]
 
-    def get_velocity(self, ticker):
-        hist = self.data.get(ticker, [])
-        if len(hist) < 3:
-            return 0.0
-        return hist[-1]["s"] - hist[-3]["s"]
+    def velocity(self, ticker):
+        h = self.data.get(ticker, [])
+        if len(h) < 5:
+            return 0
+        return h[-1]["s"] - h[-5]["s"]
 
 # =========================
-# UNIVERSE（安全版）
+# UNIVERSE
 # =========================
 def load_universe():
-    symbols = []
-
-    # NASDAQ
-    try:
-        df = pd.read_csv(
-            "https://datahub.io/core/nasdaq-listings/r/nasdaq-listed-symbols.csv"
-        )
-        symbols += df["Symbol"].tolist()
-    except:
-        pass
-
-    # GitHub
     try:
         txt = requests.get(
             "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all_tickers.txt",
             timeout=10
         ).text.splitlines()
-        symbols += txt
     except:
-        pass
+        txt = []
 
     clean = list(set([
         s.strip().upper()
-        for s in symbols
+        for s in txt
         if isinstance(s, str) and re.match(r"^[A-Z]{1,5}$", s)
     ]))
 
-    clean.sort()
-
-    # =========================
-    # 安全分割（ここが修正済みコア）
-    # =========================
-    n = min(SCAN_SIZE, len(clean))
-
-    stable_size = int(n * STABLE_RATIO)
-    random_size = n - stable_size
-
-    stable = clean[:stable_size]
-    pool = clean[stable_size:]
-
-    if len(pool) <= random_size:
-        random_sample = pool
-    else:
-        random_sample = random.sample(pool, random_size)
-
-    universe = stable + random_sample
-
-    return universe
+    random.shuffle(clean)
+    return clean[:SCAN_SIZE]
 
 # =========================
 # FETCH
@@ -120,9 +90,6 @@ def fetch(session, ticker):
             return None
 
         data = r.json()
-        if "chart" not in data or not data["chart"]["result"]:
-            return None
-
         res = data["chart"]["result"][0]
         q = res["indicators"]["quote"][0]
 
@@ -143,40 +110,70 @@ def fetch(session, ticker):
         def ret(a, b):
             return (a / b - 1) if b > 0 else 0
 
-        m6 = ret(price, c[-120])
-        m3 = ret(price, c[-63])
         m1 = ret(price, c[-21])
+        m3 = ret(price, c[-63])
+        m6 = ret(price, c[-120])
 
-        vol_recent = np.mean(v[-5:])
-        vol_past = np.mean(v[-20:-5])
+        vol_ratio = np.mean(v[-5:]) / (np.mean(v[-20:-5]) + 1e-9)
 
-        if not (vol_recent > vol_past * 1.5 or m3 > 0.4):
+        if not (vol_ratio > 1.4 or m3 > 0.35):
             return None
 
-        if (price / min(c[-10:]) - 1) < 0.03:
+        # 初動検知（重要）
+        breakout = price / max(c[-20:]) - 1
+
+        if breakout < 0.02:
             return None
 
-        def log(x):
-            return np.log1p(max(min(x, 3), 0))
-
-        m6, m3, m1 = log(m6), log(m3), log(m1)
-
-        trend = ret(np.mean(c[-10:]), np.mean(c[-30:]))
-        accel = m1 - (m3 / 3)
-
-        score = (0.3 * m6) + (0.3 * trend) + (0.4 * accel)
+        # スコア（相対化）
+        score = (
+            np.tanh(m1 * 3) * 0.4 +
+            np.tanh(m3 * 2) * 0.3 +
+            np.tanh(m6) * 0.2 +
+            np.tanh(vol_ratio - 1) * 0.1
+        )
 
         return {
             "ticker": ticker,
-            "score": score,
+            "score": float(score),
             "m1": m1,
             "m3": m3,
             "m6": m6,
-            "accel": accel
+            "vol": vol_ratio,
+            "breakout": breakout
         }
 
     except:
         return None
+
+# =========================
+# SECTOR DIVERSITY FILTER
+# =========================
+def diversify(df):
+    selected = []
+    used = set()
+
+    for _, r in df.sort_values("score", ascending=False).iterrows():
+        ticker = r["ticker"]
+
+        sector = None
+        for k, v in SECTOR_MAP.items():
+            if ticker in v:
+                sector = k
+
+        if sector is None:
+            sector = "OTHER"
+
+        if used.count(sector) >= 2:
+            continue
+
+        selected.append(r)
+        used.add(sector)
+
+        if len(selected) >= 20:
+            break
+
+    return pd.DataFrame(selected)
 
 # =========================
 # RUN
@@ -208,24 +205,32 @@ def run():
 
     df = pd.DataFrame(results)
 
-    early = df[df["score"] > 0.10].sort_values("score", ascending=False)
-    exp = df[df["score"] > 0.20].sort_values("score", ascending=False)
-    strong = df[df["score"] > 0.30].sort_values("score", ascending=False)
+    # フェーズ
+    early = df[df["score"] > 0.25]
+    exp = df[df["score"] > 0.40]
+    strong = df[df["score"] > 0.55]
+
+    # 分散適用
+    early = diversify(early)
+    exp = diversify(exp)
+    strong = diversify(strong)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v33.1",
+        "🚀 GrowthRadar v33.3",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}\n"
     ]
 
     for name, d in [("EARLY", early), ("EXP", exp), ("STRONG", strong)]:
-        msg.append(f"🔥 {name}")
+        msg.append(f"🔥 {name}:{len(d)}")
+
         for _, r in d.head(5).iterrows():
-            v = state.get_velocity(r["ticker"])
-            status = "NEW" if v > 0.2 else "KEEP" if v > 0 else "SLOW"
+            v = state.velocity(r["ticker"])
+            status = "NEW" if v > 0.2 else "RISING" if v > 0 else "SLOW"
             msg.append(f"{r['ticker']} S:{r['score']:.2f} [{status}]")
+
         msg.append("")
 
     text = "\n".join(msg)
