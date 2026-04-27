@@ -6,14 +6,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v32_25.json"
+STATE_FILE = "growth_state_v32_26.json"
+
 SCAN_SIZE = 1500
 MAX_WORKERS = 12
+
 MIN_PRICE = 5.0
 MIN_VOLUME = 500000
-HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-TOP_N = 50  # ランク計算用上位母数
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
 
 # =========================
 # STATE
@@ -55,8 +58,54 @@ class State:
         if len(hist) < 3:
             return 0.0
 
-        prev_rank = hist[-3]["r"]
-        return prev_rank - current_rank  # 上昇ならプラス
+        prev = hist[-3]["r"]
+        return prev - current_rank
+
+# =========================
+# UNIVERSE（完全復旧版）
+# =========================
+def load_universe():
+    symbols = []
+
+    # GitHub
+    try:
+        txt = requests.get(
+            "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all_tickers.txt",
+            timeout=10
+        ).text.split("\n")
+        symbols += txt
+    except:
+        print("[WARN] GitHub failed")
+
+    # NASDAQ fallback
+    try:
+        df = pd.read_csv(
+            "https://datahub.io/core/nasdaq-listings/r/nasdaq-listed-symbols.csv"
+        )
+        symbols += df["Symbol"].tolist()
+    except:
+        print("[WARN] NASDAQ CSV failed")
+
+    clean = []
+    for s in symbols:
+        if not isinstance(s, str):
+            continue
+
+        s = s.strip().upper()
+
+        # ★緩和（ここ重要）
+        if re.match(r"^[A-Z0-9\.\-]{1,6}$", s):
+            clean.append(s)
+
+    clean = list(set(clean))
+
+    if len(clean) == 0:
+        # ★絶対死なない保険
+        clean = ["AAPL", "NVDA", "MSFT", "AMD", "TSLA", "AMZN"]
+
+    random.shuffle(clean)
+
+    return clean[:SCAN_SIZE]
 
 # =========================
 # FETCH
@@ -158,32 +207,21 @@ def run():
     session.headers.update(HEADERS)
     state = State()
 
-    # universe
-    try:
-        txt = requests.get(
-            "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all_tickers.txt"
-        ).text.split("\n")
-    except:
-        txt = []
+    universe = load_universe()
 
-    symbols = list(set([
-        s.strip().upper()
-        for s in txt
-        if isinstance(s, str) and re.match(r"^[A-Z]{1,5}$", s)
-    ]))
-
-    random.shuffle(symbols)
-    universe = symbols[:SCAN_SIZE]
-
-    print(f"🚀 GrowthRadar v32.25 | Scanning {len(universe)}")
+    print(f"🚀 GrowthRadar v32.26 | Universe: {len(universe)}")
 
     results = []
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(fetch, session, t): t for t in universe}
+
         for f in as_completed(futures):
             res = f.result()
             if res:
                 results.append(res)
+
+    print(f"VALID: {len(results)}")
 
     if not results:
         print("NO DATA")
@@ -196,7 +234,7 @@ def run():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v32.25",
+        f"🚀 GrowthRadar v32.26",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}\n"
     ]
@@ -211,15 +249,13 @@ def run():
         top = data.head(5)
 
         for _, r in top.iterrows():
-            rank = int(r["rank"])
             ticker = r["ticker"]
+            rank = int(r["rank"])
 
-            prev_rank = state.data.get(ticker, [{"r": rank}])[-3]["r"] if ticker in state.data else rank
-            rank_change = prev_rank - rank
-
+            v = state.rank_velocity(ticker, rank)
             state.update(ticker, r["score"], rank)
 
-            msg.append(f"{ticker} S:{r['score']:.2f} [{status(rank_change)}]")
+            msg.append(f"{ticker} S:{r['score']:.2f} [{status(v)}]")
 
         msg.append("")
 
