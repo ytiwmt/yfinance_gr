@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v32_22.json"
+STATE_FILE = "growth_state_v32_23.json"
 SCAN_SIZE = 1500
 MAX_WORKERS = 12
 MIN_PRICE = 5.0
@@ -43,17 +43,19 @@ class State:
         hist.append({"t": time.time(), "s": float(score)})
         self.data[ticker] = hist[-30:]
 
-    # ★ 修正：平均との差分ベース
+    # ★ ハイブリッド変化検知（ここが核心）
     def get_velocity(self, ticker):
         hist = self.data.get(ticker, [])
         if len(hist) < 5:
             return 0.0
 
         scores = [h["s"] for h in hist]
+
         recent = scores[-1]
         avg = np.mean(scores[-5:])
+        delta = scores[-1] - scores[-2]
 
-        return recent - avg
+        return (recent - avg) * 0.7 + delta * 0.3
 
 # =========================
 # FETCH
@@ -95,15 +97,15 @@ def fetch(session, ticker):
             vol_recent = np.mean(v[-5:])
             vol_past = np.mean(v[-20:-5])
 
-            # ★ 資金 or 強トレンド
+            # 資金 or 強トレンド
             if not (vol_recent > vol_past * 1.5 or m3_raw > 0.4):
                 return None
 
-            # ★ 押し目反発
+            # 押し目反発
             if (price / min(c[-10:]) - 1) < 0.03:
                 return None
 
-            # ★ 過熱除外
+            # 過熱除外
             ema20 = pd.Series(c).ewm(span=20).mean().iloc[-1]
             if (price / ema20 - 1) > 0.25:
                 return None
@@ -166,7 +168,7 @@ def run():
     random.shuffle(clean)
     universe = clean[:SCAN_SIZE]
 
-    print(f"🚀 GrowthRadar v32.22 | Scan:{len(universe)}")
+    print(f"🚀 GrowthRadar v32.23 | Scan:{len(universe)}")
 
     results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
@@ -186,13 +188,13 @@ def run():
     df = pd.DataFrame(results)
 
     # =========================
-    # FILTER
+    # FILTER（ここ強化）
     # =========================
 
-    # ★ EARLY純化（強すぎ排除）
     early = df[
-        (df['m1'] > 0.05) &
-        (df['score'] < 0.9)
+        (df['m1'] > 0.08) &
+        (df['accel'] > 0.01) &
+        (df['score'] < 0.8)
     ].sort_values("score", ascending=False)
 
     exp = df[
@@ -213,23 +215,22 @@ def run():
     # =========================
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
+    def classify(v):
+        if v > 0.008:
+            return "NEW!!"
+        elif v > 0.002:
+            return "RISING"
+        elif v > -0.003:
+            return "KEEP"
+        else:
+            return "DROP"
+
     msg = [
-        f"🚀 GrowthRadar v32.22",
+        f"🚀 GrowthRadar v32.23",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         ""
     ]
-
-    def classify(v):
-        # ★ 現実スケールに修正
-        if v > 0.015:
-            return "NEW!!"
-        elif v > 0.005:
-            return "RISING"
-        elif v > -0.01:
-            return "KEEP"
-        else:
-            return "DROP"
 
     for name, d, icon in [("EARLY", early, "🔥"), ("EXP", exp, "🚀"), ("STRONG", strong, "💎")]:
         msg.append(f"{icon} {name}:{len(d)}")
