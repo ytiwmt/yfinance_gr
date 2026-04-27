@@ -6,13 +6,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v33_6.json"
+STATE_FILE = "growth_state_v33_7.json"
 
 SCAN_SIZE = 1500
 MAX_WORKERS = 12
 
-MIN_PRICE = 5.0
-MIN_VOLUME = 500000
+MIN_PRICE = 3.0          # ← 緩和（小型初動拾う）
+MIN_VOLUME = 200000      # ← 大幅緩和
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
@@ -51,7 +51,7 @@ class State:
         return hist[-1]["s"] - hist[-3]["s"]
 
 # =========================
-# UNIVERSE（完全修正版）
+# UNIVERSE（落ちない版）
 # =========================
 def load_universe():
     symbols = []
@@ -63,19 +63,16 @@ def load_universe():
         )
 
         if res.status_code == 200:
-            txt = res.text.splitlines()
-
-            for s in txt:
+            for s in res.text.splitlines():
                 if not isinstance(s, str):
                     continue
 
                 s = s.strip().upper()
 
-                # ★ 修正ポイント：柔軟化
+                # ゆるいフィルタ（初動系はこれでOK）
                 if len(s) < 1 or len(s) > 10:
                     continue
 
-                # . / - / 数字許容（BRK.B / S&P系対応）
                 if not re.match(r"^[A-Z0-9\.\-]+$", s):
                     continue
 
@@ -86,15 +83,15 @@ def load_universe():
 
     symbols = list(set(symbols))
 
-    # ★ 絶対死なない保証
-    if len(symbols) < 200:
+    # ★絶対死なない保証
+    if len(symbols) < 300:
         symbols += ["AAPL", "NVDA", "TSLA", "AMD", "META", "MSFT", "AMZN", "GOOGL"]
 
     random.shuffle(symbols)
     return symbols[:SCAN_SIZE]
 
 # =========================
-# FETCH
+# FETCH（初動重視）
 # =========================
 def fetch(session, ticker):
     try:
@@ -111,7 +108,7 @@ def fetch(session, ticker):
         c = [x for x in q["close"] if x is not None]
         v = [x for x in q["volume"] if x is not None]
 
-        if len(c) < 120:
+        if len(c) < 80:
             return None
 
         price = c[-1]
@@ -124,17 +121,25 @@ def fetch(session, ticker):
         def ret(a, b):
             return (a / b - 1) if b > 0 else 0
 
-        m6 = ret(price, c[-120])
-        m3 = ret(price, c[-63])
         m1 = ret(price, c[-21])
+        m3 = ret(price, c[-63])
+        m6 = ret(price, c[-120])
 
         vol_recent = np.mean(v[-5:])
         vol_past = np.mean(v[-20:-5])
 
-        if not (vol_recent > vol_past * 1.5 or m3 > 0.4):
+        # ★ 初動寄せ（ここが重要）
+        trigger = (
+            vol_recent > vol_past * 1.2
+            or m1 > 0.08
+            or m3 > 0.2
+        )
+
+        if not trigger:
             return None
 
-        if (price / min(c[-10:]) - 1) < 0.03:
+        # 押し目条件（超緩い）
+        if (price / min(c[-10:]) - 1) < -0.08:
             return None
 
         def log_ret(x):
@@ -145,7 +150,7 @@ def fetch(session, ticker):
         trend = ret(np.mean(c[-10:]), np.mean(c[-30:]))
         accel = m1 - (m3 / 3)
 
-        score = (0.3 * m6) + (0.3 * trend) + (0.4 * accel)
+        score = (0.25 * m6) + (0.35 * trend) + (0.40 * accel)
 
         return {
             "ticker": ticker,
@@ -167,7 +172,6 @@ def run():
     session.headers.update(HEADERS)
 
     state = State()
-
     universe = load_universe()
 
     print(f"Scanning {len(universe)} stocks...")
@@ -191,14 +195,14 @@ def run():
 
     df = pd.DataFrame(results)
 
-    early = df[df["score"] > 0.10].sort_values("score", ascending=False)
-    exp = df[df["score"] > 0.20].sort_values("score", ascending=False)
-    strong = df[df["score"] > 0.30].sort_values("score", ascending=False)
+    early = df[df["score"] > 0.05].sort_values("score", ascending=False)
+    exp = df[df["score"] > 0.12].sort_values("score", ascending=False)
+    strong = df[df["score"] > 0.20].sort_values("score", ascending=False)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v33.6",
+        f"🚀 GrowthRadar v33.7",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}\n",
         "🔥 EARLY"
