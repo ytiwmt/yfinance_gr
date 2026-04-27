@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v33.json"
+STATE_FILE = "growth_state_v33_1.json"
 
 SCAN_SIZE = 1500
 MAX_WORKERS = 12
@@ -16,9 +16,8 @@ MIN_VOLUME = 500000
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# ユニバース安定比率（ここが重要）
-STABLE_RATIO = 0.8   # 80%固定
-RANDOM_RATIO = 0.2   # 20%探索
+STABLE_RATIO = 0.8
+RANDOM_RATIO = 0.2
 
 # =========================
 # STATE
@@ -44,6 +43,8 @@ class State:
             pass
 
     def update(self, ticker, score):
+        if not np.isfinite(score):
+            return
         hist = self.data.get(ticker, [])
         hist.append({"t": time.time(), "s": float(score)})
         self.data[ticker] = hist[-30:]
@@ -55,7 +56,7 @@ class State:
         return hist[-1]["s"] - hist[-3]["s"]
 
 # =========================
-# UNIVERSE（重要改善）
+# UNIVERSE（安全版）
 # =========================
 def load_universe():
     symbols = []
@@ -85,20 +86,27 @@ def load_universe():
         if isinstance(s, str) and re.match(r"^[A-Z]{1,5}$", s)
     ]))
 
-    clean.sort()  # ★重要：固定ベース
+    clean.sort()
 
     # =========================
-    # ハイブリッドサンプリング
+    # 安全分割（ここが修正済みコア）
     # =========================
-    stable_size = int(len(clean) * STABLE_RATIO)
+    n = min(SCAN_SIZE, len(clean))
+
+    stable_size = int(n * STABLE_RATIO)
+    random_size = n - stable_size
+
     stable = clean[:stable_size]
+    pool = clean[stable_size:]
 
-    random_pool = clean[stable_size:]
-    random_sample = random.sample(random_pool, min(len(random_pool), SCAN_SIZE - stable_size))
+    if len(pool) <= random_size:
+        random_sample = pool
+    else:
+        random_sample = random.sample(pool, random_size)
 
-    universe = stable[:SCAN_SIZE - len(random_sample)] + random_sample
+    universe = stable + random_sample
 
-    return universe[:SCAN_SIZE]
+    return universe
 
 # =========================
 # FETCH
@@ -142,11 +150,9 @@ def fetch(session, ticker):
         vol_recent = np.mean(v[-5:])
         vol_past = np.mean(v[-20:-5])
 
-        # 初動 or トレンド継続
         if not (vol_recent > vol_past * 1.5 or m3 > 0.4):
             return None
 
-        # 押し目制御
         if (price / min(c[-10:]) - 1) < 0.03:
             return None
 
@@ -185,6 +191,7 @@ def run():
     print(f"Scanning {len(universe)} tickers...")
 
     results = []
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(fetch, session, t): t for t in universe}
         for f in as_completed(futures):
@@ -208,7 +215,7 @@ def run():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v33",
+        f"🚀 GrowthRadar v33.1",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}\n"
     ]
