@@ -6,14 +6,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v33_7.json"
+STATE_FILE = "growth_state_v34.json"
 
 SCAN_SIZE = 1500
-MAX_WORKERS = 12
+MAX_WORKERS = 14
 
-MIN_PRICE = 3.0          # ← 緩和（小型初動拾う）
-MIN_VOLUME = 200000      # ← 大幅緩和
-
+MIN_PRICE = 2.0        # 初動なのでさらに緩い
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # =========================
@@ -38,38 +36,35 @@ class State:
             pass
 
     def update(self, ticker, score):
-        if not np.isfinite(score):
-            return
         hist = self.data.get(ticker, [])
         hist.append({"t": time.time(), "s": float(score)})
-        self.data[ticker] = hist[-30:]
+        self.data[ticker] = hist[-40:]
 
-    def get_velocity(self, ticker):
-        hist = self.data.get(ticker, [])
-        if len(hist) < 3:
+    def slope(self, ticker):
+        h = self.data.get(ticker, [])
+        if len(h) < 5:
             return 0.0
-        return hist[-1]["s"] - hist[-3]["s"]
+        return (h[-1]["s"] - h[-5]["s"])
 
 # =========================
-# UNIVERSE（落ちない版）
+# UNIVERSE（広く拾う）
 # =========================
 def load_universe():
     symbols = []
 
     try:
-        res = requests.get(
+        r = requests.get(
             "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all_tickers.txt",
             timeout=10
         )
 
-        if res.status_code == 200:
-            for s in res.text.splitlines():
+        if r.status_code == 200:
+            for s in r.text.splitlines():
                 if not isinstance(s, str):
                     continue
 
                 s = s.strip().upper()
 
-                # ゆるいフィルタ（初動系はこれでOK）
                 if len(s) < 1 or len(s) > 10:
                     continue
 
@@ -81,21 +76,18 @@ def load_universe():
     except:
         pass
 
-    symbols = list(set(symbols))
-
-    # ★絶対死なない保証
+    # 最低保証
     if len(symbols) < 300:
-        symbols += ["AAPL", "NVDA", "TSLA", "AMD", "META", "MSFT", "AMZN", "GOOGL"]
+        symbols += ["AAPL","NVDA","TSLA","AMD","META","MSFT","AMZN"]
 
-    random.shuffle(symbols)
-    return symbols[:SCAN_SIZE]
+    return random.sample(list(set(symbols)), SCAN_SIZE)
 
 # =========================
-# FETCH（初動重視）
+# FETCH（初動検出コア）
 # =========================
 def fetch(session, ticker):
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1y&interval=1d"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=6mo&interval=1d"
         r = session.get(url, timeout=5)
 
         if r.status_code != 200:
@@ -108,57 +100,64 @@ def fetch(session, ticker):
         c = [x for x in q["close"] if x is not None]
         v = [x for x in q["volume"] if x is not None]
 
-        if len(c) < 80:
+        if len(c) < 60:
             return None
 
         price = c[-1]
         if price < MIN_PRICE:
             return None
 
-        if np.mean(v[-10:]) < MIN_VOLUME:
-            return None
+        vol_now = np.mean(v[-5:])
+        vol_base = np.mean(v[-20:-5])
 
-        def ret(a, b):
-            return (a / b - 1) if b > 0 else 0
+        def ret(a,b):
+            return (a/b - 1) if b > 0 else 0
 
         m1 = ret(price, c[-21])
         m3 = ret(price, c[-63])
-        m6 = ret(price, c[-120])
 
-        vol_recent = np.mean(v[-5:])
-        vol_past = np.mean(v[-20:-5])
+        # =========================
+        # ■ 初動検出ロジック（核心）
+        # =========================
 
-        # ★ 初動寄せ（ここが重要）
-        trigger = (
-            vol_recent > vol_past * 1.2
-            or m1 > 0.08
-            or m3 > 0.2
+        # ① 出来高“異常”だけ拾う（通常上昇は捨てる）
+        vol_spike = vol_now / (vol_base + 1e-9)
+
+        # ② まだブレイク前の圧縮状態
+        recent_range = (max(c[-10:]) - min(c[-10:])) / price
+
+        # ③ 小さな上昇 + 出来高 + 圧縮
+        early_trigger = (
+            vol_spike > 1.3 or
+            (m1 > 0.05 and vol_spike > 1.1) or
+            (m3 > 0.15 and recent_range < 0.15)
         )
 
-        if not trigger:
+        if not early_trigger:
             return None
 
-        # 押し目条件（超緩い）
-        if (price / min(c[-10:]) - 1) < -0.08:
+        # ④ 「静かな上昇」だけ残す
+        if m1 > 0.6:
             return None
 
-        def log_ret(x):
-            return np.log1p(max(min(x, 3.0), 0))
-
-        m6, m3, m1 = log_ret(m6), log_ret(m3), log_ret(m1)
-
-        trend = ret(np.mean(c[-10:]), np.mean(c[-30:]))
+        # =========================
+        # スコア（初動寄り）
+        # =========================
+        volatility = np.std(c[-10:]) / price
         accel = m1 - (m3 / 3)
 
-        score = (0.25 * m6) + (0.35 * trend) + (0.40 * accel)
+        score = (
+            0.45 * vol_spike +
+            0.30 * accel +
+            0.25 * (1 - volatility)
+        )
 
         return {
             "ticker": ticker,
             "score": score,
             "m1": m1,
             "m3": m3,
-            "m6": m6,
-            "accel": accel
+            "vol": vol_spike
         }
 
     except:
@@ -174,7 +173,7 @@ def run():
     state = State()
     universe = load_universe()
 
-    print(f"Scanning {len(universe)} stocks...")
+    print(f"🚀 v34 scanning {len(universe)}")
 
     results = []
 
@@ -182,42 +181,33 @@ def run():
         futures = {ex.submit(fetch, session, t): t for t in universe}
 
         for f in as_completed(futures):
-            res = f.result()
-            if res:
-                results.append(res)
-                state.update(res["ticker"], res["score"])
+            r = f.result()
+            if r:
+                results.append(r)
+                state.update(r["ticker"], r["score"])
 
     state.save()
 
-    if len(results) == 0:
+    if not results:
         print("NO DATA")
         return
 
     df = pd.DataFrame(results)
 
-    early = df[df["score"] > 0.05].sort_values("score", ascending=False)
-    exp = df[df["score"] > 0.12].sort_values("score", ascending=False)
-    strong = df[df["score"] > 0.20].sort_values("score", ascending=False)
+    # 初動は広く
+    early = df.sort_values("score", ascending=False).head(10)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v33.7",
+        f"🚀 GrowthRadar v34 (EARLY MODE)",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}\n",
-        "🔥 EARLY"
+        "🔥 EARLY SIGNALS"
     ]
 
-    for _, r in early.head(5).iterrows():
-        msg.append(f"{r['ticker']} S:{r['score']:.2f}")
-
-    msg.append("\n🚀 EXP")
-    for _, r in exp.head(5).iterrows():
-        msg.append(f"{r['ticker']} S:{r['score']:.2f}")
-
-    msg.append("\n💎 STRONG")
-    for _, r in strong.head(5).iterrows():
-        msg.append(f"{r['ticker']} S:{r['score']:.2f}")
+    for _, r in early.iterrows():
+        msg.append(f"{r['ticker']} S:{r['score']:.2f} VOL:{r['vol']:.2f}")
 
     text = "\n".join(msg)
     print(text)
