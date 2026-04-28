@@ -82,18 +82,28 @@ def fetch(session, ticker):
         trend = (np.mean(close[-10:]) / np.mean(close[-30:])) - 1
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
+        # =========================
+        # Phase re-balanced
+        # =========================
+
         phase = "NONE"
 
-        if (0.25 < m1 < 0.9 and m3 < 0.8):
+        # BREAKOUT（初動・変化検知）
+        breakout = (
+            m1 > 0.25 and m1 < 0.8 and vol_ratio > 1.5
+        )
+
+        # EARLY（形成途中）
+        if (0.25 < m1 < 0.7 and m3 < 0.6):
             phase = "EARLY"
+
+        # TRANSITION（加速前）
         elif (m1 > 0.45 and m3 > 0.45):
             phase = "TRANSITION"
+
+        # CONT（トレンド）
         elif (m3 > 1.0 and trend > 0.02):
             phase = "CONT"
-
-        breakout = (
-            m1 > 0.7 and vol_ratio > 1.8 and abs(m1 - m3) > 0.4
-        )
 
         score = (
             m1 * 0.6 +
@@ -115,9 +125,9 @@ def fetch(session, ticker):
         return None
 
 # =========================
-# DIFF DIAMOND ENGINE
+# DIAMOND (diff保持)
 # =========================
-def build_diamond_diff(df):
+def build_diamond(df):
     trans = df[df.phase == "TRANSITION"].copy()
 
     if len(trans) == 0:
@@ -126,30 +136,19 @@ def build_diamond_diff(df):
     trans = trans.sort_values("score", ascending=False)
 
     diamond = []
-
-    prev_score = None
+    prev = None
 
     for _, r in trans.iterrows():
-        if prev_score is None:
-            gap = 0.0
-        else:
-            gap = prev_score - r.score
+        gap = 0.0 if prev is None else prev.score - r.score
 
-        # =========================
-        # 差分条件（核心）
-        # =========================
-        if (
-            prev_score is None or
-            gap >= 0.15 or
-            r.score > trans.score.quantile(0.85)
-        ):
+        if prev is None or gap >= 0.15 or r.score > trans.score.quantile(0.85):
             diamond.append({
                 "ticker": r.ticker,
                 "score": r.score,
                 "gap": gap
             })
 
-        prev_score = r.score
+        prev = r
 
         if len(diamond) >= 5:
             break
@@ -157,7 +156,7 @@ def build_diamond_diff(df):
     return pd.DataFrame(diamond)
 
 # =========================
-# Run
+# RUN
 # =========================
 def run():
     session = requests.Session()
@@ -179,16 +178,16 @@ def run():
 
     df = pd.DataFrame(results)
 
-    diamond = build_diamond_diff(df)
+    diamond = build_diamond(df)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v37.5 (DIFF-DIAMOND)",
+        "🚀 GrowthRadar v37.6 (fixed flow model)",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
-        "💎 BUY SIGNAL（structure diff only）"
+        "💎 BUY SIGNAL"
     ]
 
     if len(diamond) == 0:
@@ -197,24 +196,20 @@ def run():
         for _, r in diamond.iterrows():
             msg.append(f"**{r.ticker}** S:{r.score:.2f} GAP:{r.gap:.2f}")
 
-    # EARLY
     early = df[df.phase=="EARLY"].sort_values("score", ascending=False).head(4)
     msg.append("\n🔥 EARLY")
     msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in early.iterrows()] or ["None"]
 
-    # TRANSITION
     trans = df[df.phase=="TRANSITION"].sort_values("score", ascending=False).head(4)
     msg.append("\n⚡ TRANSITION")
     msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in trans.iterrows()] or ["None"]
 
-    # CONT
     cont = df[df.phase=="CONT"].sort_values("score", ascending=False).head(4)
     msg.append("\n🔁 CONT")
     msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in cont.iterrows()] or ["None"]
 
-    # BREAKOUT
     brk = df[df.breakout].sort_values("vol_ratio", ascending=False).head(4)
-    msg.append("\n🧨 BREAKOUT (log)")
+    msg.append("\n🧨 BREAKOUT")
     msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in brk.iterrows()] or ["None"]
 
     msg.append("")
