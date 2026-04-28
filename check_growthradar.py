@@ -15,7 +15,7 @@ MIN_VOL = 300000
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # =========================
-# v36.4構造（外部ユニバース維持）
+# ユニバース（外部依存維持）
 # =========================
 def load_universe():
     symbols = set()
@@ -81,13 +81,11 @@ def fetch(session, ticker):
 
         accel = m1 - (m3 / 3)
         trend = (np.mean(close[-10:]) / np.mean(close[-30:])) - 1
-
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
         # =========================
-        # フェーズ定義（既存）
+        # フェーズ定義
         # =========================
-
         is_early = (0.25 < m1 < 0.9 and m3 < 0.8 and accel > 0.05)
 
         is_transition = (
@@ -97,21 +95,14 @@ def fetch(session, ticker):
         is_cont = (m3 > 1.0 and trend > 0.02)
 
         # =========================
-        # ★新規検出レイヤー（重要）
+        # BREAKOUT（新規）
         # =========================
-
-        # AEHR / BBGI型
         breakout = (
-            m1 > 0.7 and
-            vol_ratio > 1.8 and
-            abs(m1 - m3) > 0.4
+            m1 > 0.7 and vol_ratio > 1.8 and abs(m1 - m3) > 0.4
         )
 
-        # 初動スパイク（IPO/急騰初期）
         spike_entry = (
-            m1 > 0.5 and
-            m3 < 0.6 and
-            vol_ratio > 2.0
+            m1 > 0.5 and m3 < 0.6 and vol_ratio > 2.0
         )
 
         if not (is_early or is_transition or is_cont or breakout or spike_entry):
@@ -139,6 +130,16 @@ def fetch(session, ticker):
         return None
 
 # =========================
+# スコア
+# =========================
+def score(row):
+    return (
+        row.get("m1", 0) * 0.6 +
+        row.get("m3", 0) * 0.3 +
+        row.get("vol_ratio", 1) * 0.1
+    )
+
+# =========================
 # 実行
 # =========================
 def run():
@@ -161,49 +162,61 @@ def run():
         return
 
     df = pd.DataFrame(results)
+    df["score"] = df.apply(score, axis=1)
 
-    early = df[df.phase == "EARLY"].sort_values("accel", ascending=False)
-    trans = df[df.phase == "TRANSITION"].sort_values("m1", ascending=False)
-    cont = df[df.phase == "CONT"].sort_values("m3", ascending=False)
-    breakout = df[df.phase == "BREAKOUT"].sort_values("vol_ratio", ascending=False)
+    def top_n(d, n=4):
+        if len(d) == 0:
+            return d
+        return d.sort_values("score", ascending=False).head(n)
+
+    breakout = top_n(df[df.phase == "BREAKOUT"])
+    early = top_n(df[df.phase == "EARLY"])
+    trans = top_n(df[df.phase == "TRANSITION"])
+    cont = top_n(df[df.phase == "CONT"])
+
+    final = pd.concat([breakout, early, trans, cont]).sort_values("score", ascending=False).head(5)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v36.4-X",
+        "🚀 GrowthRadar v37.0",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
         "💎 BUY SIGNAL"
     ]
 
-    for _, r in breakout.head(3).iterrows():
-        msg.append(f"💎 {r.ticker}")
+    # =========================
+    # 💎（意思決定層）
+    # =========================
+    for _, r in final.iterrows():
+        msg.append(f"**{r.ticker}**")
 
-    msg.append("\n🔥 BREAKOUT (NEW ENTRY)")
-    for _, r in breakout.head(10).iterrows():
-        msg.append(f"{r.ticker} M1:{r.m1:.2f} VOL:{r.vol_ratio:.2f}")
+    # =========================
+    # 分類（Top4制限）
+    # =========================
+    msg.append("\n🚀 BREAKOUT (Top4)")
+    for _, r in breakout.iterrows():
+        msg.append(f"{r.ticker} S:{r.score:.2f}")
 
-    msg.append("\n🔥 EARLY")
-    for _, r in early.head(10).iterrows():
-        msg.append(f"{r.ticker} A:{r.accel:.2f} M1:{r.m1:.2f}")
+    msg.append("\n🔥 EARLY (Top4)")
+    for _, r in early.iterrows():
+        msg.append(f"{r.ticker} S:{r.score:.2f}")
 
-    msg.append("\n⚡ TRANSITION")
-    for _, r in trans.head(10).iterrows():
-        msg.append(f"{r.ticker} M1:{r.m1:.2f} M3:{r.m3:.2f}")
+    msg.append("\n⚡ TRANSITION (Top4)")
+    for _, r in trans.iterrows():
+        msg.append(f"{r.ticker} S:{r.score:.2f}")
 
-    msg.append("\n🔁 CONT")
-    for _, r in cont.head(10).iterrows():
-        msg.append(f"{r.ticker} M3:{r.m3:.2f}")
+    msg.append("\n🔁 CONT (Top4)")
+    for _, r in cont.iterrows():
+        msg.append(f"{r.ticker} S:{r.score:.2f}")
 
     text = "\n".join(msg)
 
     print(text)
 
     if WEBHOOK_URL:
-        if len(text) > 1900:
-            text = text[:1900]
-        requests.post(WEBHOOK_URL, json={"content": text})
+        requests.post(WEBHOOK_URL, json={"content": text[:1900]})
 
 if __name__ == "__main__":
     run()
