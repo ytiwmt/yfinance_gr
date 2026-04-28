@@ -6,13 +6,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v34_2.json"
+STATE_FILE = "growth_state_v34_3.json"
 
 SCAN_SIZE = 1500
 MAX_WORKERS = 14
 
-MIN_PRICE = 3.0          # 低すぎ排除
-MIN_BASE_VOLUME = 100000 # 流動性フィルタ
+MIN_PRICE = 5.0
+MIN_BASE_VOLUME = 300000   # 引き上げ（マイクロ排除）
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
@@ -43,12 +43,11 @@ class State:
         self.data[ticker] = hist[-40:]
 
 # =========================
-# UNIVERSE（耐障害）
+# UNIVERSE
 # =========================
 def load_universe():
     symbols = []
 
-    # GitHub
     try:
         r = requests.get(
             "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all_tickers.txt",
@@ -57,18 +56,16 @@ def load_universe():
         if r.status_code == 200:
             symbols += r.text.splitlines()
     except:
-        print("[GitHub FAIL]")
+        pass
 
-    # NASDAQ
     try:
         df = pd.read_csv(
             "https://datahub.io/core/nasdaq-listings/r/nasdaq-listed-symbols.csv"
         )
         symbols += df["Symbol"].tolist()
     except:
-        print("[NASDAQ FAIL]")
+        pass
 
-    # clean
     symbols = [
         s.strip().upper()
         for s in symbols
@@ -77,22 +74,18 @@ def load_universe():
 
     symbols = list(set(symbols))
 
-    fallback = ["AAPL","NVDA","TSLA","AMD","META","MSFT","AMZN","GOOGL"]
-
-    if len(symbols) < 300:
-        print("⚠ universe不足 → fallback拡張")
-        symbols += fallback * 200
+    if len(symbols) < 500:
+        symbols += ["AAPL","NVDA","MSFT","AMD","AMZN","META","GOOGL"] * 200
 
     random.shuffle(symbols)
-
     return symbols[:SCAN_SIZE]
 
 # =========================
-# FETCH（初動 + ノイズ除去）
+# FETCH（AEHR型）
 # =========================
 def fetch(session, ticker):
     try:
-        # --- SPAC/ゴミ除去 ---
+        # SPAC排除
         if ticker.endswith(("U","W","R")):
             return None
 
@@ -114,11 +107,10 @@ def fetch(session, ticker):
 
         price = c[-1]
 
-        # --- 価格フィルタ ---
+        # ---- 基本フィルタ ----
         if price < MIN_PRICE:
             return None
 
-        # --- 出来高 ---
         vol_now = np.mean(v[-5:])
         vol_base = np.mean(v[-20:-5])
 
@@ -126,8 +118,6 @@ def fetch(session, ticker):
             return None
 
         vol_spike = vol_now / (vol_base + 1e-9)
-
-        # --- 異常クリップ ---
         vol_spike = min(vol_spike, 5)
 
         def ret(a,b):
@@ -136,45 +126,47 @@ def fetch(session, ticker):
         m1 = ret(price, c[-21])
         m3 = ret(price, c[-63])
 
-        # --- 圧縮状態 ---
-        recent_range = (max(c[-10:]) - min(c[-10:])) / price
-
-        # =========================
-        # 初動条件
-        # =========================
-        if not (
-            vol_spike > 1.3 or
-            (m1 > 0.05 and vol_spike > 1.1) or
-            (m3 > 0.15 and recent_range < 0.15)
-        ):
-            return None
-
-        # --- 過熱排除 ---
-        if m1 > 0.6:
-            return None
-
-        # --- ボラ ---
-        volatility = np.std(c[-10:]) / price
-        if volatility > 0.15:
+        # ---- 初動条件（厳格化）----
+        if m1 < 0.05:
             return None
 
         accel = m1 - (m3 / 3)
+        if accel <= 0:
+            return None
 
+        # ---- ノイズ排除 ----
+        if vol_spike >= 5 and m1 < 0.1:
+            return None
+
+        volatility = np.std(c[-10:]) / price
+        if volatility > 0.12:
+            return None
+
+        # トレンド確認（AEHR型）
+        ma10 = np.mean(c[-10:])
+        ma30 = np.mean(c[-30:])
+        trend = ret(ma10, ma30)
+
+        if trend < 0:
+            return None
+
+        # ---- スコア ----
         score = (
-            0.45 * vol_spike +
-            0.30 * accel +
-            0.25 * (1 - volatility)
+            0.30 * vol_spike +
+            0.40 * accel +
+            0.30 * trend
         )
 
-        # --- 異常スコア排除 ---
-        if score > 5 or score < 0:
+        if score <= 0 or score > 5:
             return None
 
         return {
             "ticker": ticker,
             "score": score,
             "vol": vol_spike,
-            "m1": m1
+            "m1": m1,
+            "accel": accel,
+            "trend": trend
         }
 
     except:
@@ -190,7 +182,7 @@ def run():
     state = State()
     universe = load_universe()
 
-    print(f"🚀 GrowthRadar v34.2 scanning {len(universe)}")
+    print(f"🚀 GrowthRadar v34.3 scanning {len(universe)}")
 
     results = []
 
@@ -210,20 +202,28 @@ def run():
         return
 
     df = pd.DataFrame(results)
-    top = df.sort_values("score", ascending=False).head(10)
+    df = df.sort_values("score", ascending=False)
+
+    top = df.head(10)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v34.2",
+        f"🚀 GrowthRadar v34.3",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
-        "🔥 EARLY SIGNALS"
+        "🔥 AEHR-TYPE EARLY"
     ]
 
     for _, r in top.iterrows():
-        msg.append(f"{r['ticker']} S:{r['score']:.2f} VOL:{r['vol']:.2f} M1:{r['m1']:.2f}")
+        msg.append(
+            f"{r['ticker']} "
+            f"S:{r['score']:.2f} "
+            f"VOL:{r['vol']:.2f} "
+            f"M1:{r['m1']:.2f} "
+            f"A:{r['accel']:.2f}"
+        )
 
     text = "\n".join(msg)
 
