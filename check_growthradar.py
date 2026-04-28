@@ -6,12 +6,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v34.json"
+STATE_FILE = "growth_state_v34_1.json"
 
 SCAN_SIZE = 1500
 MAX_WORKERS = 14
+MIN_PRICE = 2.0
 
-MIN_PRICE = 2.0        # 初動なのでさらに緩い
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # =========================
@@ -40,50 +40,58 @@ class State:
         hist.append({"t": time.time(), "s": float(score)})
         self.data[ticker] = hist[-40:]
 
-    def slope(self, ticker):
-        h = self.data.get(ticker, [])
-        if len(h) < 5:
-            return 0.0
-        return (h[-1]["s"] - h[-5]["s"])
-
 # =========================
-# UNIVERSE（広く拾う）
+# UNIVERSE（完全耐障害）
 # =========================
 def load_universe():
     symbols = []
 
+    # --- source 1 ---
     try:
         r = requests.get(
             "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all_tickers.txt",
             timeout=10
         )
-
         if r.status_code == 200:
-            for s in r.text.splitlines():
-                if not isinstance(s, str):
-                    continue
-
-                s = s.strip().upper()
-
-                if len(s) < 1 or len(s) > 10:
-                    continue
-
-                if not re.match(r"^[A-Z0-9\.\-]+$", s):
-                    continue
-
-                symbols.append(s)
-
+            symbols += r.text.splitlines()
     except:
-        pass
+        print("[source1 FAIL]")
 
-    # 最低保証
-    if len(symbols) < 300:
-        symbols += ["AAPL","NVDA","TSLA","AMD","META","MSFT","AMZN"]
+    # --- source 2 ---
+    try:
+        df = pd.read_csv(
+            "https://datahub.io/core/nasdaq-listings/r/nasdaq-listed-symbols.csv"
+        )
+        symbols += df["Symbol"].tolist()
+    except:
+        print("[source2 FAIL]")
 
-    return random.sample(list(set(symbols)), SCAN_SIZE)
+    # --- clean ---
+    symbols = [
+        s.strip().upper()
+        for s in symbols
+        if isinstance(s, str) and re.match(r"^[A-Z0-9\.\-]{1,10}$", s)
+    ]
+
+    symbols = list(set(symbols))
+
+    # --- fallback強化 ---
+    fallback = ["AAPL","NVDA","TSLA","AMD","META","MSFT","AMZN","GOOGL"]
+
+    if len(symbols) < 200:
+        print("⚠ universe不足 → 強制拡張")
+        symbols = symbols + fallback * 200
+
+    random.shuffle(symbols)
+
+    # --- 安全サンプリング ---
+    if len(symbols) >= SCAN_SIZE:
+        return symbols[:SCAN_SIZE]
+    else:
+        return symbols  # 足りないならそのまま
 
 # =========================
-# FETCH（初動検出コア）
+# FETCH（初動検出）
 # =========================
 def fetch(session, ticker):
     try:
@@ -107,42 +115,30 @@ def fetch(session, ticker):
         if price < MIN_PRICE:
             return None
 
-        vol_now = np.mean(v[-5:])
-        vol_base = np.mean(v[-20:-5])
-
         def ret(a,b):
             return (a/b - 1) if b > 0 else 0
 
         m1 = ret(price, c[-21])
         m3 = ret(price, c[-63])
 
-        # =========================
-        # ■ 初動検出ロジック（核心）
-        # =========================
-
-        # ① 出来高“異常”だけ拾う（通常上昇は捨てる）
+        vol_now = np.mean(v[-5:])
+        vol_base = np.mean(v[-20:-5])
         vol_spike = vol_now / (vol_base + 1e-9)
 
-        # ② まだブレイク前の圧縮状態
         recent_range = (max(c[-10:]) - min(c[-10:])) / price
 
-        # ③ 小さな上昇 + 出来高 + 圧縮
-        early_trigger = (
+        # 初動条件
+        if not (
             vol_spike > 1.3 or
             (m1 > 0.05 and vol_spike > 1.1) or
             (m3 > 0.15 and recent_range < 0.15)
-        )
-
-        if not early_trigger:
+        ):
             return None
 
-        # ④ 「静かな上昇」だけ残す
+        # 過熱排除
         if m1 > 0.6:
             return None
 
-        # =========================
-        # スコア（初動寄り）
-        # =========================
         volatility = np.std(c[-10:]) / price
         accel = m1 - (m3 / 3)
 
@@ -155,8 +151,6 @@ def fetch(session, ticker):
         return {
             "ticker": ticker,
             "score": score,
-            "m1": m1,
-            "m3": m3,
             "vol": vol_spike
         }
 
@@ -173,7 +167,7 @@ def run():
     state = State()
     universe = load_universe()
 
-    print(f"🚀 v34 scanning {len(universe)}")
+    print(f"🚀 v34.1 scanning {len(universe)}")
 
     results = []
 
@@ -193,23 +187,23 @@ def run():
         return
 
     df = pd.DataFrame(results)
-
-    # 初動は広く
-    early = df.sort_values("score", ascending=False).head(10)
+    top = df.sort_values("score", ascending=False).head(10)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v34 (EARLY MODE)",
+        f"🚀 GrowthRadar v34.1",
         f"Scan:{len(universe)} Valid:{len(df)}",
-        f"Time:{now}\n",
+        f"Time:{now}",
+        "",
         "🔥 EARLY SIGNALS"
     ]
 
-    for _, r in early.iterrows():
+    for _, r in top.iterrows():
         msg.append(f"{r['ticker']} S:{r['score']:.2f} VOL:{r['vol']:.2f}")
 
     text = "\n".join(msg)
+
     print(text)
 
     if WEBHOOK_URL:
