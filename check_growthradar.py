@@ -3,7 +3,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v35_1.json"
+STATE_FILE = "growth_state_v36.json"
 
 SCAN_SIZE = 1500
 MAX_WORKERS = 14
@@ -13,9 +13,6 @@ MIN_BASE_VOLUME = 300000
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# =========================
-# STATE
-# =========================
 class State:
     def __init__(self):
         self.data = self.load()
@@ -39,9 +36,6 @@ class State:
         hist.append({"t": time.time(), "s": float(score)})
         self.data[ticker] = hist[-40:]
 
-# =========================
-# UNIVERSE
-# =========================
 def load_universe():
     symbols = []
 
@@ -77,9 +71,6 @@ def load_universe():
     random.shuffle(symbols)
     return symbols[:SCAN_SIZE]
 
-# =========================
-# FETCH
-# =========================
 def fetch(session, ticker):
     try:
         if ticker.endswith(("U","W","R")):
@@ -125,71 +116,51 @@ def fetch(session, ticker):
         ma30 = np.mean(c[-30:])
         trend = ret(ma10, ma30)
 
-        # =========================
-        # ★ 初動（最終形）
-        # =========================
+        # ===== フェーズ分類 =====
         is_early = (
-            (m1 > 0.2 and m1 < 0.75) and
+            (m1 > 0.2 and m1 < 0.72) and
             (accel > 0.08) and
+            (m3 < 0.8) and
             (vol_spike > 1.2)
         )
 
-        # CONT（完成なので維持）
-        is_cont  = (m3 > 0.4 and trend > 0.03 and m1 > -0.1)
-        is_hold  = (m3 > 0.5 and trend > -0.02)
+        is_transition = (
+            (m1 > 0.4 and m1 < 1.2) and
+            (m3 > 0.8) and
+            (accel > 0) and
+            (trend > 0.02)
+        )
 
-        if not (is_early or is_cont or is_hold):
+        is_cont = (
+            (m3 > 1.0) and
+            (trend > 0.03)
+        )
+
+        is_hold = (m3 > 0.5 and trend > -0.02)
+
+        if not (is_early or is_transition or is_cont or is_hold):
             return None
-
-        # スコア（参考程度）
-        vol_norm = min(vol_spike / 3, 1.0)
-
-        early_score = (
-            0.45 * accel +
-            0.35 * vol_norm +
-            0.20 * (1 - volatility)
-        )
-
-        cont_score  = (
-            0.40 * m3 +
-            0.30 * trend +
-            0.30 * (1 - volatility)
-        )
-
-        hold_score  = (
-            0.50 * m3 +
-            0.30 * (1 - volatility) +
-            0.20 * trend
-        )
 
         return {
             "ticker": ticker,
             "early": is_early,
+            "transition": is_transition,
             "cont": is_cont,
             "hold": is_hold,
-            "early_score": early_score,
-            "cont_score": cont_score,
-            "hold_score": hold_score,
             "m1": m1,
             "m3": m3,
-            "vol": vol_spike,
-            "accel": accel
+            "accel": accel,
+            "trend": trend
         }
 
     except:
         return None
 
-# =========================
-# MAIN
-# =========================
 def run():
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    state = State()
     universe = load_universe()
-
-    print(f"🚀 GrowthRadar v35.1 scanning {len(universe)}")
 
     results = []
 
@@ -199,9 +170,6 @@ def run():
             r = f.result()
             if r:
                 results.append(r)
-                state.update(r["ticker"], r["early_score"])
-
-    state.save()
 
     if not results:
         print("NO DATA")
@@ -209,41 +177,26 @@ def run():
 
     df = pd.DataFrame(results)
 
-    # =========================
-    # BUY構成（初動優先）
-    # =========================
-    early_buy = df[df["early"]].sort_values(
-        ["accel", "early_score"], ascending=False
-    ).head(3)
+    early_df = df[df["early"]].sort_values("accel", ascending=False).head(10)
+    trans_df = df[df["transition"]].sort_values("m3", ascending=False).head(10)
+    cont_df  = df[df["cont"]].sort_values("m3", ascending=False).head(10)
 
-    cont_buy  = df[df["cont"]].sort_values("cont_score", ascending=False).head(2)
+    early_buy = early_df.head(2)
+    trans_buy = trans_df.head(2)
+    cont_buy  = cont_df.head(2)
 
-    hybrid = df[(df["early"]) & (df["cont"])].sort_values(
-        ["accel"], ascending=False
-    ).head(1)
-
-    buy_df = pd.concat([early_buy, cont_buy, hybrid]).drop_duplicates("ticker")
-
-    # =========================
-    # 表示
-    # =========================
-    early_df = df[df["early"]].sort_values(
-        ["accel"], ascending=False
-    ).head(10)
-
-    cont_df  = df[df["cont"]].sort_values("cont_score", ascending=False).head(10)
-    hold_df  = df[df["hold"]].sort_values("hold_score", ascending=False).head(10)
+    buy_df = pd.concat([early_buy, trans_buy, cont_buy]).drop_duplicates("ticker")
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v35.1",
+        "🚀 GrowthRadar v36.0",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
-        ""
+        "",
+        "💎 BUY SIGNAL"
     ]
 
-    msg.append("💎 BUY SIGNAL")
     for _, r in buy_df.iterrows():
         msg.append(f"**{r['ticker']}**")
 
@@ -251,20 +204,15 @@ def run():
     for _, r in early_df.iterrows():
         msg.append(f"{r['ticker']} A:{r['accel']:.2f} M1:{r['m1']:.2f}")
 
+    msg.append("\n⚡ TRANSITION")
+    for _, r in trans_df.iterrows():
+        msg.append(f"{r['ticker']} M1:{r['m1']:.2f} M3:{r['m3']:.2f}")
+
     msg.append("\n🔁 CONT")
     for _, r in cont_df.iterrows():
-        msg.append(f"{r['ticker']} S:{r['cont_score']:.2f} M3:{r['m3']:.2f}")
+        msg.append(f"{r['ticker']} M3:{r['m3']:.2f}")
 
-    msg.append("\n🧱 HOLD")
-    for _, r in hold_df.iterrows():
-        msg.append(f"{r['ticker']} S:{r['hold_score']:.2f} M3:{r['m3']:.2f}")
-
-    text = "\n".join(msg)
-
-    print(text)
-
-    if WEBHOOK_URL:
-        requests.post(WEBHOOK_URL, json={"content": text[:1900]})
+    print("\n".join(msg))
 
 if __name__ == "__main__":
     run()
