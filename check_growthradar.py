@@ -15,7 +15,7 @@ MIN_VOL = 300000
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # =========================
-# Universe（外部依存維持）
+# Universe
 # =========================
 def load_universe():
     symbols = set()
@@ -84,7 +84,7 @@ def fetch(session, ticker):
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
         # =========================
-        # フェーズ（説明用）
+        # フェーズ
         # =========================
         phase = "NONE"
 
@@ -96,14 +96,10 @@ def fetch(session, ticker):
             phase = "CONT"
 
         # =========================
-        # BREAKOUT（監視専用）
+        # BREAKOUT（ログ専用）
         # =========================
         breakout = (
             m1 > 0.7 and vol_ratio > 1.8 and abs(m1 - m3) > 0.4
-        )
-
-        spike_entry = (
-            m1 > 0.5 and m3 < 0.6 and vol_ratio > 2.0
         )
 
         # =========================
@@ -119,10 +115,8 @@ def fetch(session, ticker):
             "ticker": ticker,
             "phase": phase,
             "score": score,
-            "m1": m1,
-            "m3": m3,
             "vol_ratio": vol_ratio,
-            "breakout": breakout or spike_entry
+            "breakout": breakout
         }
 
     except:
@@ -140,7 +134,6 @@ def run():
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(fetch, session, t): t for t in universe}
-
         for f in as_completed(futures):
             r = f.result()
             if r:
@@ -152,11 +145,7 @@ def run():
 
     df = pd.DataFrame(results)
 
-    # =========================
-    # ★重要：BREAKOUTは完全除外
-    # =========================
     breakout_df = df[df["breakout"]]
-
     normal_df = df[~df["breakout"]]
 
     # =========================
@@ -164,13 +153,10 @@ def run():
     # =========================
     final = normal_df.sort_values("score", ascending=False).head(5)
 
-    # =========================
-    # 表示
-    # =========================
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v37.1",
+        "🚀 GrowthRadar v37.2",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
@@ -179,6 +165,22 @@ def run():
 
     for _, r in final.iterrows():
         msg.append(f"**{r.ticker}**")
+
+    # =========================
+    # 5層表示（完全復元）
+    # =========================
+
+    msg.append("\n🔥 EARLY (Top4)")
+    for _, r in df[df.phase == "EARLY"].sort_values("score", ascending=False).head(4).iterrows():
+        msg.append(f"{r.ticker} S:{r.score:.2f}")
+
+    msg.append("\n⚡ TRANSITION (Top4)")
+    for _, r in df[df.phase == "TRANSITION"].sort_values("score", ascending=False).head(4).iterrows():
+        msg.append(f"{r.ticker} S:{r.score:.2f}")
+
+    msg.append("\n🔁 CONT (Top4)")
+    for _, r in df[df.phase == "CONT"].sort_values("score", ascending=False).head(4).iterrows():
+        msg.append(f"{r.ticker} S:{r.score:.2f}")
 
     msg.append("\n🚀 BREAKOUT (log)")
     for _, r in breakout_df.sort_values("vol_ratio", ascending=False).head(4).iterrows():
