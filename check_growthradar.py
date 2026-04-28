@@ -1,4 +1,4 @@
-import os, requests, pandas as pd, numpy as np, random, re, json, time
+import os, requests, pandas as pd, numpy as np, random, re
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -28,14 +28,6 @@ def load_universe():
     except:
         pass
 
-    try:
-        df = pd.read_csv(
-            "https://datahub.io/core/nasdaq-listings/r/nasdaq-listed-symbols.csv"
-        )
-        symbols += df["Symbol"].tolist()
-    except:
-        pass
-
     symbols = [
         s.strip().upper()
         for s in symbols
@@ -45,7 +37,7 @@ def load_universe():
     symbols = list(set(symbols))
 
     if len(symbols) < 500:
-        symbols += ["AAPL","NVDA","MSFT","AMD","AMZN","META","GOOGL"] * 200
+        symbols += ["AAPL","NVDA","MSFT","AMD","AMZN","META"] * 200
 
     random.shuffle(symbols)
     return symbols[:SCAN_SIZE]
@@ -74,7 +66,6 @@ def fetch(session, ticker):
         if price < MIN_PRICE:
             return None
 
-        vol_now = np.mean(v[-5:])
         vol_base = np.mean(v[-20:-5])
         if vol_base < MIN_BASE_VOLUME:
             return None
@@ -83,6 +74,7 @@ def fetch(session, ticker):
 
         m1 = ret(price, c[-21])
         m3 = ret(price, c[-63])
+
         accel = m1 - (m3 / 3)
 
         ma10 = np.mean(c[-10:])
@@ -90,38 +82,38 @@ def fetch(session, ticker):
         trend = ret(ma10, ma30)
 
         # =========================
-        # フェーズ（完全排他）
+        # フェーズ設計（妥当版）
         # =========================
 
-        phase = None
+        # EARLY：純初動
+        is_early = (
+            m1 > 0.25 and m1 < 0.9 and
+            m3 < 0.8 and
+            accel > 0.06
+        )
 
-        # EARLY（最優先）
-        if (
-            0.2 < m1 < 0.8 and
-            m3 < 0.9 and
-            accel > 0.08
-        ):
-            phase = "EARLY"
+        # TRANSITION：核心（AEHR/BBGI型含む）
+        # → 重要：乖離＋未完成トレンド
+        is_transition = (
+            m1 > 0.5 and
+            m3 > 0.5 and
+            m3 < 1.2 and
+            m1 > m3 * 1.05 and   # 先行性
+            abs(m1 - m3) <= 0.5 and
+            trend > 0.01
+        )
 
-        # TRANSITION（中間状態）
-        elif (
-            m1 > 0.4 and
-            m3 > 0.6 and
-            abs(m1 - m3) <= 0.35 and
-            trend > 0.02
-        ):
-            phase = "TRANSITION"
-
-        # CONT（トレンド確定）
-        elif (
+        # CONT：トレンド確定
+        is_cont = (
             m3 > 1.0 and
             m1 < m3 and
-            trend > 0.03
-        ):
-            phase = "CONT"
+            trend > 0.02
+        )
 
-        else:
+        if not (is_early or is_transition or is_cont):
             return None
+
+        phase = "EARLY" if is_early else "TRANSITION" if is_transition else "CONT"
 
         return {
             "ticker": ticker,
@@ -159,26 +151,23 @@ def run():
     df = pd.DataFrame(results)
 
     early_df = df[df["phase"] == "EARLY"].sort_values("accel", ascending=False)
-    trans_df = df[df["phase"] == "TRANSITION"].sort_values("m3", ascending=False)
+    trans_df = df[df["phase"] == "TRANSITION"].sort_values("m1", ascending=False)
     cont_df  = df[df["phase"] == "CONT"].sort_values("m3", ascending=False)
 
     # =========================
-    # BUY（完全状態制御）
+    # BUY LOGIC
     # =========================
     buy = []
 
-    # EARLY
     for _, r in early_df.head(2).iterrows():
         buy.append(r["ticker"])
 
-    # TRANSITION
     for _, r in trans_df.iterrows():
         if r["ticker"] not in buy:
             buy.append(r["ticker"])
-        if len(buy) >= 4:
+        if len(buy) >= 5:
             break
 
-    # CONT
     for _, r in cont_df.iterrows():
         if r["ticker"] not in buy:
             buy.append(r["ticker"])
@@ -188,7 +177,7 @@ def run():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v36.4",
+        "🚀 GrowthRadar v36.5",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
@@ -211,18 +200,12 @@ def run():
         msg.append(f"{r['ticker']} M3:{r['m3']:.2f}")
 
     text = "\n".join(msg)
-
     print(text)
 
     if WEBHOOK_URL:
-        try:
-            if len(text) > 1900:
-                text = text[:1900] + "\n…(truncated)"
-            r = requests.post(WEBHOOK_URL, json={"content": text})
-            if r.status_code != 204:
-                print("Webhook error:", r.status_code, r.text)
-        except Exception as e:
-            print("Webhook exception:", e)
+        if len(text) > 1900:
+            text = text[:1900] + "\n…"
+        requests.post(WEBHOOK_URL, json={"content": text})
 
 if __name__ == "__main__":
     run()
