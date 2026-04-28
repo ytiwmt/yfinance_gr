@@ -38,6 +38,7 @@ def load_universe():
     ]
 
     symbols.update(fallback)
+
     symbols = list(symbols)
     random.shuffle(symbols)
 
@@ -56,8 +57,11 @@ def fetch(session, ticker):
         data = r.json()
         result = data["chart"]["result"][0]
 
-        close = [x for x in result["indicators"]["quote"][0]["close"] if x]
-        volume = [x for x in result["indicators"]["quote"][0]["volume"] if x]
+        close = result["indicators"]["quote"][0]["close"]
+        volume = result["indicators"]["quote"][0]["volume"]
+
+        close = [x for x in close if x is not None]
+        volume = [x for x in volume if x is not None]
 
         if len(close) < 60:
             return None
@@ -81,18 +85,24 @@ def fetch(session, ticker):
         # =========================
         # Phase
         # =========================
+        phase = "NONE"
+
         if (0.25 < m1 < 0.9 and m3 < 0.8):
             phase = "EARLY"
         elif (m1 > 0.45 and m3 > 0.45):
             phase = "TRANSITION"
         elif (m3 > 1.0 and trend > 0.02):
             phase = "CONT"
-        else:
-            phase = "NONE"
 
-        breakout = (m1 > 0.7 and vol_ratio > 1.8 and abs(m1 - m3) > 0.4)
+        breakout = (
+            m1 > 0.7 and vol_ratio > 1.8 and abs(m1 - m3) > 0.4
+        )
 
-        score = m1 * 0.6 + m3 * 0.3 + vol_ratio * 0.1
+        score = (
+            m1 * 0.6 +
+            m3 * 0.3 +
+            vol_ratio * 0.1
+        )
 
         return {
             "ticker": ticker,
@@ -108,26 +118,22 @@ def fetch(session, ticker):
         return None
 
 # =========================
-# UI FORMATTERS
+# UI Helper（None統一）
 # =========================
-
-def format_section(title, df, col="score", topn=4, label="S", star=False):
-    msg = [f"{title}"]
+def section(title, df, col="score", topn=4):
+    out = [f"\n{title}"]
 
     if df is None or len(df) == 0:
-        msg.append("None")
-        return msg
+        out.append("None")
+        return out
 
-    df = df.sort_values(col, ascending=False).head(topn)
+    for _, r in df.sort_values(col, ascending=False).head(topn).iterrows():
+        out.append(f"{r.ticker} S:{getattr(r, col):.2f}")
 
-    for _, r in df.iterrows():
-        mark = "★" if star else ""
-        msg.append(f"{r.ticker}{mark} {label}:{getattr(r, col):.2f}")
-
-    return msg
+    return out
 
 # =========================
-# RUN
+# Run
 # =========================
 def run():
     session = requests.Session()
@@ -151,64 +157,31 @@ def run():
 
     transition_df = df[df.phase == "TRANSITION"]
 
-    # =========================
-    # 💎 FINAL DECISION（TRANSITION限定）
-    # =========================
-    final = transition_df.sort_values("score", ascending=False).head(5)
-    final_set = set(final["ticker"])
+    # 💎 = TRANSITION限定
+    diamond = transition_df.sort_values("score", ascending=False).head(5)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v37.3-S FINAL",
+        "🚀 GrowthRadar v37.3-S (UI Final)",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
-        "💎 BUY SIGNAL（final decision）"
+        "💎 BUY SIGNAL（decision layer）"
     ]
 
-    if len(final) == 0:
+    if len(diamond) == 0:
         msg.append("None")
     else:
-        for _, r in final.iterrows():
+        for _, r in diamond.iterrows():
             msg.append(f"**{r.ticker}** S:{r.score:.2f}")
 
-    msg.append("")
-    msg.append("────────────────────")
+    msg += section("🔥 EARLY (setup)", df[df.phase=="EARLY"])
+    msg += section("⚡ TRANSITION (evaluation)", transition_df)
+    msg += section("🔁 CONT (trend)", df[df.phase=="CONT"])
+    msg += section("🧨 BREAKOUT (log)", df[df.breakout])
 
-    # =========================
-    # 🔥 EARLY（setup）
-    # =========================
-    msg += format_section("🔥 EARLY（setup / context）", df[df.phase=="EARLY"])
-
-    msg.append("")
-    msg.append("────────────────────")
-
-    # =========================
-    # ⚡ TRANSITION（pre-momentum）
-    # =========================
-    msg += format_section("⚡ TRANSITION（pre-momentum）", transition_df, star=True)
-
-    msg.append("")
-    msg.append("────────────────────")
-
-    # =========================
-    # 🔁 CONT（trend hold）
-    # =========================
-    msg += format_section("🔁 CONT（trend hold）", df[df.phase=="CONT"])
-
-    msg.append("")
-    msg.append("────────────────────")
-
-    # =========================
-    # 🧨 BREAKOUT（observation only）
-    # =========================
-    breakout_df = df[df.breakout]
-    msg += format_section("🧨 BREAKOUT（observation only）", breakout_df)
-
-    # =========================
-    # FINAL FORMAT RULE
-    # =========================
+    # 最後に必ず空行
     msg.append("")
 
     text = "\n".join(msg)
