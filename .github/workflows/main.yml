@@ -1,34 +1,28 @@
-name: GrowthRadar Test
+name: GrowthRadar
 
 on:
-  workflow_dispatch:
-  push:
-    branches: [ main ]
   schedule:
-    - cron: "0 0 * * *"   # 09:00 JST
-    - cron: "0 6 * * *"   # 15:00 JST
-    - cron: "0 12 * * *"  # 21:00 JST
+    - cron: "*/5 * * * *"   # 5分ごと
+  workflow_dispatch:
 
 jobs:
-  run-scan:
+  run:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install requests pandas numpy
+          pip install requests redis numpy pandas
 
       - name: Run GrowthRadar
         env:
-          WEBHOOK_URL_GROWTHRADAR: ${{ secrets.WEBHOOK_URL_GROWTHRADAR }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
         run: |
-          python check_growthradar.py
+          python growthradar.py
