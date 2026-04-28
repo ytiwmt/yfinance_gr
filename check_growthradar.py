@@ -82,7 +82,7 @@ def fetch(session, ticker):
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
         # =========================
-        # PHASES (clean separation)
+        # CORE PHASES
         # =========================
 
         phase = "NONE"
@@ -97,18 +97,19 @@ def fetch(session, ticker):
             phase = "CONT"
 
         # =========================
-        # BREAKOUT (EVENT ONLY)
+        # BREAKOUT (PURE EVENT ONLY)
         # =========================
-        # ← ここが完全に変更点
+        # ★完全非スコア化
+
+        price_jump = abs(close[-1] - close[-2]) / close[-2]
+        volume_spike = volume[-1] / (vol_base + 1e-9)
 
         breakout_event = (
-            vol_ratio > 2.0 and
-            abs(close[-1] - close[-2]) / close[-2] > 0.03
+            price_jump > 0.03 and
+            volume_spike > 2.2
         )
 
-        # 「強さ」を一切使わない
-        # 「時間的変化だけ」を使う
-
+        # スコアはもう使わない（分析用に残すだけ）
         score = (
             m1 * 0.6 +
             m3 * 0.3 +
@@ -129,7 +130,7 @@ def fetch(session, ticker):
         return None
 
 # =========================
-# DIFF DIAMOND (unchanged)
+# DIAMOND
 # =========================
 def build_diamond(df):
     trans = df[df.phase == "TRANSITION"].copy()
@@ -187,7 +188,7 @@ def run():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v37.7 (EVENT-DRIVEN BREAKOUT)",
+        "🚀 GrowthRadar v37.8 (PURE EVENT BREAKOUT)",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
@@ -212,11 +213,12 @@ def run():
     msg.append("\n🔁 CONT")
     msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in cont.iterrows()] or ["None"]
 
-    # BREAKOUT = event log only
+    # BREAKOUT = pure event log only
     brk = df[df.breakout].head(4)
-    msg.append("\n🧨 BREAKOUT (event)")
+    msg.append("\n🧨 BREAKOUT (event-only)")
     msg += [f"{r.ticker}" for _, r in brk.iterrows()] or ["None"]
 
+    # ★重要：強制空行（確実に入れる）
     msg.append("")
 
     text = "\n".join(msg)
