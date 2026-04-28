@@ -79,12 +79,11 @@ def fetch(session, ticker):
         m1 = ret(close[-1], close[-21])
         m3 = ret(close[-1], close[-63])
 
-        accel = m1 - (m3 / 3)
         trend = (np.mean(close[-10:]) / np.mean(close[-30:])) - 1
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
         # =========================
-        # フェーズ
+        # フェーズ（説明用）
         # =========================
         phase = "NONE"
 
@@ -96,15 +95,12 @@ def fetch(session, ticker):
             phase = "CONT"
 
         # =========================
-        # BREAKOUT（ログ専用）
+        # BREAKOUT（観測のみ）
         # =========================
         breakout = (
             m1 > 0.7 and vol_ratio > 1.8 and abs(m1 - m3) > 0.4
         )
 
-        # =========================
-        # スコア（統一）
-        # =========================
         score = (
             m1 * 0.6 +
             m3 * 0.3 +
@@ -149,40 +145,60 @@ def run():
     normal_df = df[~df["breakout"]]
 
     # =========================
-    # 💎（意思決定）
+    # 💎（唯一の意思決定層）
     # =========================
     final = normal_df.sort_values("score", ascending=False).head(5)
+    final_set = set(final["ticker"])
+
+    # =========================
+    # 表示（重複は許容するが意味を分離）
+    # =========================
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v37.2",
+        "🚀 GrowthRadar v37.3",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
-        "💎 BUY SIGNAL"
+        "💎 BUY SIGNAL（final decision）"
     ]
 
+    # 💎
     for _, r in final.iterrows():
         msg.append(f"**{r.ticker}**")
 
     # =========================
-    # 5層表示（完全復元）
+    # EARLY（説明層）
     # =========================
+    msg.append("\n🔥 EARLY（setup / context）")
+    early = df[df.phase == "EARLY"].sort_values("score", ascending=False).head(4)
+    for _, r in early.iterrows():
+        tag = "★" if r.ticker in final_set else ""
+        msg.append(f"{r.ticker}{tag} S:{r.score:.2f}")
 
-    msg.append("\n🔥 EARLY (Top4)")
-    for _, r in df[df.phase == "EARLY"].sort_values("score", ascending=False).head(4).iterrows():
-        msg.append(f"{r.ticker} S:{r.score:.2f}")
+    # =========================
+    # TRANSITION
+    # =========================
+    msg.append("\n⚡ TRANSITION（pre-momentum）")
+    trans = df[df.phase == "TRANSITION"].sort_values("score", ascending=False).head(4)
+    for _, r in trans.iterrows():
+        tag = "★" if r.ticker in final_set else ""
+        msg.append(f"{r.ticker}{tag} S:{r.score:.2f}")
 
-    msg.append("\n⚡ TRANSITION (Top4)")
-    for _, r in df[df.phase == "TRANSITION"].sort_values("score", ascending=False).head(4).iterrows():
-        msg.append(f"{r.ticker} S:{r.score:.2f}")
+    # =========================
+    # CONT
+    # =========================
+    msg.append("\n🔁 CONT（trend hold）")
+    cont = df[df.phase == "CONT"].sort_values("score", ascending=False).head(4)
+    for _, r in cont.iterrows():
+        tag = "★" if r.ticker in final_set else ""
+        msg.append(f"{r.ticker}{tag} S:{r.score:.2f}")
 
-    msg.append("\n🔁 CONT (Top4)")
-    for _, r in df[df.phase == "CONT"].sort_values("score", ascending=False).head(4).iterrows():
-        msg.append(f"{r.ticker} S:{r.score:.2f}")
-
-    msg.append("\n🚀 BREAKOUT (log)")
+    # =========================
+    # BREAKOUT（観測のみ）
+    # =========================
+    msg.append("\n🚀 BREAKOUT（observation only）")
     for _, r in breakout_df.sort_values("vol_ratio", ascending=False).head(4).iterrows():
         msg.append(f"{r.ticker} S:{r.score:.2f}")
 
