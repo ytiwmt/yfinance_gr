@@ -6,13 +6,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v34_3.json"
+STATE_FILE = "growth_state_v34_4.json"
 
 SCAN_SIZE = 1500
 MAX_WORKERS = 14
 
 MIN_PRICE = 5.0
-MIN_BASE_VOLUME = 300000   # 引き上げ（マイクロ排除）
+MIN_BASE_VOLUME = 300000
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
@@ -81,11 +81,10 @@ def load_universe():
     return symbols[:SCAN_SIZE]
 
 # =========================
-# FETCH（AEHR型）
+# FETCH
 # =========================
 def fetch(session, ticker):
     try:
-        # SPAC排除
         if ticker.endswith(("U","W","R")):
             return None
 
@@ -107,7 +106,6 @@ def fetch(session, ticker):
 
         price = c[-1]
 
-        # ---- 基本フィルタ ----
         if price < MIN_PRICE:
             return None
 
@@ -126,23 +124,12 @@ def fetch(session, ticker):
         m1 = ret(price, c[-21])
         m3 = ret(price, c[-63])
 
-        # ---- 初動条件（厳格化）----
-        if m1 < 0.05:
-            return None
-
         accel = m1 - (m3 / 3)
-        if accel <= 0:
-            return None
-
-        # ---- ノイズ排除 ----
-        if vol_spike >= 5 and m1 < 0.1:
-            return None
 
         volatility = np.std(c[-10:]) / price
         if volatility > 0.12:
             return None
 
-        # トレンド確認（AEHR型）
         ma10 = np.mean(c[-10:])
         ma30 = np.mean(c[-30:])
         trend = ret(ma10, ma30)
@@ -150,23 +137,50 @@ def fetch(session, ticker):
         if trend < 0:
             return None
 
-        # ---- スコア ----
-        score = (
-            0.30 * vol_spike +
-            0.40 * accel +
-            0.30 * trend
+        # =========================
+        # EARLY（初動）
+        # =========================
+        is_early = (
+            m1 > 0.05 and
+            accel > 0 and
+            not (vol_spike >= 5 and m1 < 0.1)
         )
 
-        if score <= 0 or score > 5:
+        # =========================
+        # CONTINUATION（継続）
+        # =========================
+        is_cont = (
+            m3 > 0.4 and
+            trend > 0.05 and
+            m1 > 0 and
+            volatility < 0.10
+        )
+
+        if not (is_early or is_cont):
             return None
+
+        # スコア分離
+        early_score = (
+            0.35 * vol_spike +
+            0.45 * accel +
+            0.20 * (1 - volatility)
+        )
+
+        cont_score = (
+            0.40 * m3 +
+            0.30 * trend +
+            0.30 * (1 - volatility)
+        )
 
         return {
             "ticker": ticker,
-            "score": score,
-            "vol": vol_spike,
+            "early": is_early,
+            "cont": is_cont,
+            "early_score": early_score,
+            "cont_score": cont_score,
             "m1": m1,
-            "accel": accel,
-            "trend": trend
+            "m3": m3,
+            "vol": vol_spike
         }
 
     except:
@@ -182,7 +196,7 @@ def run():
     state = State()
     universe = load_universe()
 
-    print(f"🚀 GrowthRadar v34.3 scanning {len(universe)}")
+    print(f"🚀 GrowthRadar v34.4 scanning {len(universe)}")
 
     results = []
 
@@ -193,7 +207,7 @@ def run():
             r = f.result()
             if r:
                 results.append(r)
-                state.update(r["ticker"], r["score"])
+                state.update(r["ticker"], r["early_score"])
 
     state.save()
 
@@ -202,28 +216,26 @@ def run():
         return
 
     df = pd.DataFrame(results)
-    df = df.sort_values("score", ascending=False)
 
-    top = df.head(10)
+    early_df = df[df["early"]].sort_values("early_score", ascending=False).head(10)
+    cont_df = df[df["cont"]].sort_values("cont_score", ascending=False).head(10)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v34.3",
+        f"🚀 GrowthRadar v34.4",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
-        "",
-        "🔥 AEHR-TYPE EARLY"
+        ""
     ]
 
-    for _, r in top.iterrows():
-        msg.append(
-            f"{r['ticker']} "
-            f"S:{r['score']:.2f} "
-            f"VOL:{r['vol']:.2f} "
-            f"M1:{r['m1']:.2f} "
-            f"A:{r['accel']:.2f}"
-        )
+    msg.append("🔥 EARLY (初動)")
+    for _, r in early_df.iterrows():
+        msg.append(f"{r['ticker']} S:{r['early_score']:.2f} M1:{r['m1']:.2f} VOL:{r['vol']:.2f}")
+
+    msg.append("\n🔁 CONTINUATION (継続)")
+    for _, r in cont_df.iterrows():
+        msg.append(f"{r['ticker']} S:{r['cont_score']:.2f} M3:{r['m3']:.2f}")
 
     text = "\n".join(msg)
 
