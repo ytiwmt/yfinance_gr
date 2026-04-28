@@ -3,7 +3,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v34_5.json"
+STATE_FILE = "growth_state_v34_7.json"
 
 SCAN_SIZE = 1500
 MAX_WORKERS = 14
@@ -120,7 +120,6 @@ def fetch(session, ticker):
         ma30 = np.mean(c[-30:])
         trend = ret(ma10, ma30)
 
-        # ===== カテゴリ =====
         is_early = (m1 > 0.05 and accel > 0 and not (vol_spike >= 5 and m1 < 0.1))
         is_cont  = (m3 > 0.4 and trend > 0.03 and m1 > -0.02)
         is_hold  = (m3 > 0.5 and trend > -0.02)
@@ -158,7 +157,7 @@ def run():
     state = State()
     universe = load_universe()
 
-    print(f"🚀 GrowthRadar v34.5 scanning {len(universe)}")
+    print(f"🚀 GrowthRadar v34.7 scanning {len(universe)}")
 
     results = []
 
@@ -178,29 +177,46 @@ def run():
 
     df = pd.DataFrame(results)
 
+    # =========================
+    # BUYロジック
+    # =========================
+    early_buy = df[
+        (df["early"]) &
+        (df["m1"] > 0.2) &
+        (df["vol"] > 1.5)
+    ].sort_values("early_score", ascending=False).head(3)
+
+    cont_buy = df[
+        (df["cont"]) &
+        (df["m1"] > -0.05) &
+        (df["m1"] < 0.3)
+    ].sort_values("cont_score", ascending=False).head(2)
+
+    buy_df = pd.concat([early_buy, cont_buy])
+    buy_df = buy_df.drop_duplicates(subset="ticker", keep="first")
+
+    # =========================
+    # 表示
+    # =========================
     early_df = df[df["early"]].sort_values("early_score", ascending=False).head(10)
     cont_df  = df[df["cont"]].sort_values("cont_score", ascending=False).head(10)
     hold_df  = df[df["hold"]].sort_values("hold_score", ascending=False).head(10)
 
-    # 💎 BUY判定
-    buy_candidates = []
-
-    buy_candidates += early_df.head(3).to_dict("records")
-    buy_candidates += cont_df.head(2).to_dict("records")
-
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v34.5",
+        f"🚀 GrowthRadar v34.7",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         ""
     ]
 
-    msg.append("💎 BUY SIGNAL")
-    for r in buy_candidates:
-        msg.append(f"💎 {r['ticker']} S:{r.get('early_score', r.get('cont_score',0)):.2f}")
+    # 💎 BUY（UI改善済）
+    msg.append("💎 BUY SIGNAL\n")
+    for _, r in buy_df.iterrows():
+        msg.append(f"**{r['ticker']}**")
 
+    # カテゴリ
     msg.append("\n🔥 EARLY")
     for _, r in early_df.iterrows():
         msg.append(f"{r['ticker']} S:{r['early_score']:.2f} M1:{r['m1']:.2f}")
