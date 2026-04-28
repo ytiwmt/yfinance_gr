@@ -2,7 +2,10 @@ name: GrowthRadar
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # 5分ごと
+    - cron: "*/5 * * * *"
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
@@ -18,11 +21,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests redis numpy pandas
+          pip install requests numpy pandas
 
       - name: Run GrowthRadar
         env:
           REDIS_URL: ${{ secrets.REDIS_URL }}
-          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL_GROWTHRADAR }}
+          WEBHOOK_URL_GROWTHRADAR: ${{ secrets.WEBHOOK_URL_GROWTHRADAR }}
         run: |
           python check_growthradar.py
