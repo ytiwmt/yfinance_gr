@@ -82,9 +82,6 @@ def fetch(session, ticker):
         trend = (np.mean(close[-10:]) / np.mean(close[-30:])) - 1
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
-        # =========================
-        # Phase
-        # =========================
         phase = "NONE"
 
         if (0.25 < m1 < 0.9 and m3 < 0.8):
@@ -118,19 +115,33 @@ def fetch(session, ticker):
         return None
 
 # =========================
-# UI Helper（None統一）
+# Decision Engine
 # =========================
-def section(title, df, col="score", topn=4):
-    out = [f"\n{title}"]
+def build_diamond(df):
+    trans = df[df.phase == "TRANSITION"].copy()
 
-    if df is None or len(df) == 0:
-        out.append("None")
-        return out
+    if len(trans) == 0:
+        return pd.DataFrame()
 
-    for _, r in df.sort_values(col, ascending=False).head(topn).iterrows():
-        out.append(f"{r.ticker} S:{getattr(r, col):.2f}")
+    trans = trans.sort_values("score", ascending=False)
 
-    return out
+    top = trans.head(5)
+
+    # =========================
+    # 追加：順位差（gap）
+    # =========================
+    top_scores = top["score"].values
+
+    gaps = []
+    for i in range(len(top_scores)):
+        if i == 0:
+            gaps.append(0.0)
+        else:
+            gaps.append(top_scores[i-1] - top_scores[i])
+
+    top["gap"] = gaps
+
+    return top
 
 # =========================
 # Run
@@ -155,33 +166,44 @@ def run():
 
     df = pd.DataFrame(results)
 
-    transition_df = df[df.phase == "TRANSITION"]
-
-    # 💎 = TRANSITION限定
-    diamond = transition_df.sort_values("score", ascending=False).head(5)
+    diamond = build_diamond(df)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v37.3-S (UI Final)",
+        "🚀 GrowthRadar v37.4 (Decision Strength)",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
-        "💎 BUY SIGNAL（decision layer）"
+        "💎 BUY SIGNAL（decision + strength）"
     ]
 
     if len(diamond) == 0:
         msg.append("None")
     else:
         for _, r in diamond.iterrows():
-            msg.append(f"**{r.ticker}** S:{r.score:.2f}")
+            msg.append(f"**{r.ticker}** S:{r.score:.2f} GAP:{r.gap:.2f}")
 
-    msg += section("🔥 EARLY (setup)", df[df.phase=="EARLY"])
-    msg += section("⚡ TRANSITION (evaluation)", transition_df)
-    msg += section("🔁 CONT (trend)", df[df.phase=="CONT"])
-    msg += section("🧨 BREAKOUT (log)", df[df.breakout])
+    # EARLY
+    early = df[df.phase=="EARLY"].sort_values("score", ascending=False).head(4)
+    msg.append("\n🔥 EARLY")
+    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in early.iterrows()] or ["None"]
 
-    # 最後に必ず空行
+    # TRANSITION
+    trans = df[df.phase=="TRANSITION"].sort_values("score", ascending=False).head(4)
+    msg.append("\n⚡ TRANSITION")
+    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in trans.iterrows()] or ["None"]
+
+    # CONT
+    cont = df[df.phase=="CONT"].sort_values("score", ascending=False).head(4)
+    msg.append("\n🔁 CONT")
+    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in cont.iterrows()] or ["None"]
+
+    # BREAKOUT
+    brk = df[df.breakout].sort_values("vol_ratio", ascending=False).head(4)
+    msg.append("\n🧨 BREAKOUT (log)")
+    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in brk.iterrows()] or ["None"]
+
     msg.append("")
 
     text = "\n".join(msg)
