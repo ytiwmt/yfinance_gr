@@ -3,7 +3,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v35_0.json"
+STATE_FILE = "growth_state_v35_1.json"
 
 SCAN_SIZE = 1500
 MAX_WORKERS = 14
@@ -126,23 +126,22 @@ def fetch(session, ticker):
         trend = ret(ma10, ma30)
 
         # =========================
-        # 初動（緩和版）
+        # ★ 初動（最終形）
         # =========================
         is_early = (
-            (m1 > 0.2 and m1 < 0.9) and
-            (accel > 0.03) and
+            (m1 > 0.2 and m1 < 0.75) and
+            (accel > 0.08) and
             (vol_spike > 1.2)
         )
 
+        # CONT（完成なので維持）
         is_cont  = (m3 > 0.4 and trend > 0.03 and m1 > -0.1)
         is_hold  = (m3 > 0.5 and trend > -0.02)
 
         if not (is_early or is_cont or is_hold):
             return None
 
-        # =========================
-        # スコア（正規化）
-        # =========================
+        # スコア（参考程度）
         vol_norm = min(vol_spike / 3, 1.0)
 
         early_score = (
@@ -190,7 +189,7 @@ def run():
     state = State()
     universe = load_universe()
 
-    print(f"🚀 GrowthRadar v35.0 scanning {len(universe)}")
+    print(f"🚀 GrowthRadar v35.1 scanning {len(universe)}")
 
     results = []
 
@@ -211,38 +210,46 @@ def run():
     df = pd.DataFrame(results)
 
     # =========================
-    # BUY構成（拡張）
+    # BUY構成（初動優先）
     # =========================
-    early_buy = df[df["early"]].sort_values("early_score", ascending=False).head(3)
+    early_buy = df[df["early"]].sort_values(
+        ["accel", "early_score"], ascending=False
+    ).head(3)
+
     cont_buy  = df[df["cont"]].sort_values("cont_score", ascending=False).head(2)
-    hybrid    = df[(df["early"]) & (df["cont"])].sort_values("early_score", ascending=False).head(1)
+
+    hybrid = df[(df["early"]) & (df["cont"])].sort_values(
+        ["accel"], ascending=False
+    ).head(1)
 
     buy_df = pd.concat([early_buy, cont_buy, hybrid]).drop_duplicates("ticker")
 
     # =========================
     # 表示
     # =========================
-    early_df = df[df["early"]].sort_values("early_score", ascending=False).head(10)
+    early_df = df[df["early"]].sort_values(
+        ["accel"], ascending=False
+    ).head(10)
+
     cont_df  = df[df["cont"]].sort_values("cont_score", ascending=False).head(10)
     hold_df  = df[df["hold"]].sort_values("hold_score", ascending=False).head(10)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v35.0",
+        f"🚀 GrowthRadar v35.1",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         ""
     ]
 
-    # ← 改行削除済
     msg.append("💎 BUY SIGNAL")
     for _, r in buy_df.iterrows():
         msg.append(f"**{r['ticker']}**")
 
     msg.append("\n🔥 EARLY")
     for _, r in early_df.iterrows():
-        msg.append(f"{r['ticker']} S:{r['early_score']:.2f} M1:{r['m1']:.2f} A:{r['accel']:.2f}")
+        msg.append(f"{r['ticker']} A:{r['accel']:.2f} M1:{r['m1']:.2f}")
 
     msg.append("\n🔁 CONT")
     for _, r in cont_df.iterrows():
