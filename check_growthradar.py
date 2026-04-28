@@ -115,9 +115,9 @@ def fetch(session, ticker):
         return None
 
 # =========================
-# Decision Engine
+# DIFF DIAMOND ENGINE
 # =========================
-def build_diamond(df):
+def build_diamond_diff(df):
     trans = df[df.phase == "TRANSITION"].copy()
 
     if len(trans) == 0:
@@ -125,23 +125,36 @@ def build_diamond(df):
 
     trans = trans.sort_values("score", ascending=False)
 
-    top = trans.head(5)
+    diamond = []
 
-    # =========================
-    # 追加：順位差（gap）
-    # =========================
-    top_scores = top["score"].values
+    prev_score = None
 
-    gaps = []
-    for i in range(len(top_scores)):
-        if i == 0:
-            gaps.append(0.0)
+    for _, r in trans.iterrows():
+        if prev_score is None:
+            gap = 0.0
         else:
-            gaps.append(top_scores[i-1] - top_scores[i])
+            gap = prev_score - r.score
 
-    top["gap"] = gaps
+        # =========================
+        # 差分条件（核心）
+        # =========================
+        if (
+            prev_score is None or
+            gap >= 0.15 or
+            r.score > trans.score.quantile(0.85)
+        ):
+            diamond.append({
+                "ticker": r.ticker,
+                "score": r.score,
+                "gap": gap
+            })
 
-    return top
+        prev_score = r.score
+
+        if len(diamond) >= 5:
+            break
+
+    return pd.DataFrame(diamond)
 
 # =========================
 # Run
@@ -166,16 +179,16 @@ def run():
 
     df = pd.DataFrame(results)
 
-    diamond = build_diamond(df)
+    diamond = build_diamond_diff(df)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v37.4 (Decision Strength)",
+        "🚀 GrowthRadar v37.5 (DIFF-DIAMOND)",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
-        "💎 BUY SIGNAL（decision + strength）"
+        "💎 BUY SIGNAL（structure diff only）"
     ]
 
     if len(diamond) == 0:
