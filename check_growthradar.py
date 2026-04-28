@@ -15,7 +15,7 @@ MIN_VOL = 300000
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # =========================
-# Universe（固定なし）
+# Universe（外部依存維持）
 # =========================
 def load_universe():
     symbols = set()
@@ -29,7 +29,6 @@ def load_universe():
             sym = l.split(",")[0].strip().upper()
             if re.match(r"^[A-Z]{1,6}$", sym):
                 symbols.add(sym)
-
     except:
         pass
 
@@ -46,7 +45,7 @@ def load_universe():
     return symbols[:SCAN_SIZE]
 
 # =========================
-# Data
+# Fetch
 # =========================
 def fetch(session, ticker):
     try:
@@ -57,6 +56,7 @@ def fetch(session, ticker):
 
         data = r.json()
         result = data["chart"]["result"][0]
+
         close = result["indicators"]["quote"][0]["close"]
         volume = result["indicators"]["quote"][0]["volume"]
 
@@ -95,13 +95,19 @@ def fetch(session, ticker):
         elif (m3 > 1.0 and trend > 0.02):
             phase = "CONT"
 
-        # BREAKOUTはログ専用
-        breakout_flag = (
+        # =========================
+        # BREAKOUT（監視専用）
+        # =========================
+        breakout = (
             m1 > 0.7 and vol_ratio > 1.8 and abs(m1 - m3) > 0.4
         )
 
+        spike_entry = (
+            m1 > 0.5 and m3 < 0.6 and vol_ratio > 2.0
+        )
+
         # =========================
-        # 統一スコア（重要）
+        # スコア（統一）
         # =========================
         score = (
             m1 * 0.6 +
@@ -116,14 +122,14 @@ def fetch(session, ticker):
             "m1": m1,
             "m3": m3,
             "vol_ratio": vol_ratio,
-            "breakout": breakout_flag
+            "breakout": breakout or spike_entry
         }
 
     except:
         return None
 
 # =========================
-# 実行
+# Run
 # =========================
 def run():
     session = requests.Session()
@@ -147,18 +153,19 @@ def run():
     df = pd.DataFrame(results)
 
     # =========================
-    # 💎（唯一意思決定）
+    # ★重要：BREAKOUTは完全除外
     # =========================
-    candidates = df.sort_values("score", ascending=False)
-    final = candidates.head(5)
+    breakout_df = df[df["breakout"]]
+
+    normal_df = df[~df["breakout"]]
 
     # =========================
-    # BREAKOUTログ（監視専用）
+    # 💎（意思決定）
     # =========================
-    breakout = df[df["breakout"]].sort_values("vol_ratio", ascending=False).head(4)
+    final = normal_df.sort_values("score", ascending=False).head(5)
 
     # =========================
-    # 出力
+    # 表示
     # =========================
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -174,7 +181,7 @@ def run():
         msg.append(f"**{r.ticker}**")
 
     msg.append("\n🚀 BREAKOUT (log)")
-    for _, r in breakout.iterrows():
+    for _, r in breakout_df.sort_values("vol_ratio", ascending=False).head(4).iterrows():
         msg.append(f"{r.ticker} S:{r.score:.2f}")
 
     text = "\n".join(msg)
