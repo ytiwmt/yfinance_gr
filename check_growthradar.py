@@ -3,6 +3,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
+
 SCAN_SIZE = 1500
 MAX_WORKERS = 14
 
@@ -11,6 +12,9 @@ MIN_BASE_VOLUME = 300000
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
+# =========================
+# UNIVERSE
+# =========================
 def load_universe():
     symbols = []
 
@@ -46,7 +50,9 @@ def load_universe():
     random.shuffle(symbols)
     return symbols[:SCAN_SIZE]
 
-
+# =========================
+# FETCH
+# =========================
 def fetch(session, ticker):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=6mo&interval=1d"
@@ -83,10 +89,28 @@ def fetch(session, ticker):
         ma30 = np.mean(c[-30:])
         trend = ret(ma10, ma30)
 
-        # ===== フェーズ =====
-        is_early = (0.2 < m1 < 0.72 and accel > 0.08 and m3 < 0.8)
-        is_transition = (0.4 < m1 < 1.2 and m3 > 0.8 and accel > 0 and trend > 0.02)
-        is_cont = (m3 > 1.0 and trend > 0.03)
+        # =========================
+        # フェーズ（完全版）
+        # =========================
+
+        is_early = (
+            0.2 < m1 < 0.8 and
+            m3 < 0.9 and
+            accel > 0.08
+        )
+
+        is_transition = (
+            m1 > 0.4 and
+            m3 > 0.6 and
+            abs(m1 - m3) <= 0.35 and
+            trend > 0.02
+        )
+
+        is_cont = (
+            m3 > 1.0 and
+            m1 < m3 and
+            trend > 0.03
+        )
 
         if not (is_early or is_transition or is_cont):
             return None
@@ -98,13 +122,16 @@ def fetch(session, ticker):
             "cont": is_cont,
             "m1": m1,
             "m3": m3,
-            "accel": accel
+            "accel": accel,
+            "trend": trend
         }
 
     except:
         return None
 
-
+# =========================
+# MAIN
+# =========================
 def run():
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -119,6 +146,10 @@ def run():
             if r:
                 results.append(r)
 
+    if not results:
+        print("NO DATA")
+        return
+
     df = pd.DataFrame(results)
 
     early_df = df[df["early"]].sort_values("accel", ascending=False)
@@ -126,19 +157,22 @@ def run():
     cont_df  = df[df["cont"]].sort_values("m3", ascending=False)
 
     # =========================
-    # BUY（優先順位制御）
+    # BUY（完全排他）
     # =========================
     buy = []
 
+    # EARLY
     for _, r in early_df.head(2).iterrows():
         buy.append(r["ticker"])
 
+    # TRANSITION
     for _, r in trans_df.iterrows():
         if r["ticker"] not in buy:
             buy.append(r["ticker"])
         if len(buy) >= 4:
             break
 
+    # CONT
     for _, r in cont_df.iterrows():
         if r["ticker"] not in buy:
             buy.append(r["ticker"])
@@ -148,7 +182,7 @@ def run():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v36.2",
+        "🚀 GrowthRadar v36.3",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
@@ -174,14 +208,18 @@ def run():
 
     print(text)
 
+    # =========================
+    # NOTIFICATION
+    # =========================
     if WEBHOOK_URL:
         try:
             if len(text) > 1900:
-                text = text[:1900] + "\n…"
-            requests.post(WEBHOOK_URL, json={"content": text})
+                text = text[:1900] + "\n…(truncated)"
+            r = requests.post(WEBHOOK_URL, json={"content": text})
+            if r.status_code != 204:
+                print("Webhook error:", r.status_code, r.text)
         except Exception as e:
-            print("Webhook error:", e)
-
+            print("Webhook exception:", e)
 
 if __name__ == "__main__":
     run()
