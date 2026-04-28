@@ -3,7 +3,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v34_9.json"
+STATE_FILE = "growth_state_v35_0.json"
 
 SCAN_SIZE = 1500
 MAX_WORKERS = 14
@@ -46,14 +46,19 @@ def load_universe():
     symbols = []
 
     try:
-        r = requests.get("https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all_tickers.txt", timeout=10)
+        r = requests.get(
+            "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all_tickers.txt",
+            timeout=10
+        )
         if r.status_code == 200:
             symbols += r.text.splitlines()
     except:
         pass
 
     try:
-        df = pd.read_csv("https://datahub.io/core/nasdaq-listings/r/nasdaq-listed-symbols.csv")
+        df = pd.read_csv(
+            "https://datahub.io/core/nasdaq-listings/r/nasdaq-listed-symbols.csv"
+        )
         symbols += df["Symbol"].tolist()
     except:
         pass
@@ -104,7 +109,7 @@ def fetch(session, ticker):
         if vol_base < MIN_BASE_VOLUME:
             return None
 
-        vol_spike = min(vol_now / (vol_base + 1e-9), 5)
+        vol_spike = vol_now / (vol_base + 1e-9)
 
         def ret(a,b): return (a/b - 1) if b > 0 else 0
 
@@ -113,7 +118,7 @@ def fetch(session, ticker):
         accel = m1 - (m3 / 3)
 
         volatility = np.std(c[-10:]) / price
-        if volatility > 0.15:
+        if volatility > 0.18:
             return None
 
         ma10 = np.mean(c[-10:])
@@ -121,15 +126,14 @@ def fetch(session, ticker):
         trend = ret(ma10, ma30)
 
         # =========================
-        # ★ 初動の精密化（ここが核心）
+        # 初動（緩和版）
         # =========================
         is_early = (
-            (m1 > 0.25 and m1 < 0.9) and
-            (accel > 0.05) and
-            (vol_spike > 1.3)
+            (m1 > 0.2 and m1 < 0.9) and
+            (accel > 0.03) and
+            (vol_spike > 1.2)
         )
 
-        # 継続（変更なし）
         is_cont  = (m3 > 0.4 and trend > 0.03 and m1 > -0.1)
         is_hold  = (m3 > 0.5 and trend > -0.02)
 
@@ -137,11 +141,27 @@ def fetch(session, ticker):
             return None
 
         # =========================
-        # ★ スコア再設計（初動特化）
+        # スコア（正規化）
         # =========================
-        early_score = (0.5 * accel) + (0.4 * vol_spike) + (0.1 * (1 - volatility))
-        cont_score  = (0.4 * m3) + (0.3 * trend) + (0.3 * (1 - volatility))
-        hold_score  = (0.5 * m3) + (0.3 * (1 - volatility)) + (0.2 * trend)
+        vol_norm = min(vol_spike / 3, 1.0)
+
+        early_score = (
+            0.45 * accel +
+            0.35 * vol_norm +
+            0.20 * (1 - volatility)
+        )
+
+        cont_score  = (
+            0.40 * m3 +
+            0.30 * trend +
+            0.30 * (1 - volatility)
+        )
+
+        hold_score  = (
+            0.50 * m3 +
+            0.30 * (1 - volatility) +
+            0.20 * trend
+        )
 
         return {
             "ticker": ticker,
@@ -170,7 +190,7 @@ def run():
     state = State()
     universe = load_universe()
 
-    print(f"🚀 GrowthRadar v34.9 scanning {len(universe)}")
+    print(f"🚀 GrowthRadar v35.0 scanning {len(universe)}")
 
     results = []
 
@@ -191,9 +211,9 @@ def run():
     df = pd.DataFrame(results)
 
     # =========================
-    # BUY構成（完成版）
+    # BUY構成（拡張）
     # =========================
-    early_buy = df[df["early"]].sort_values("early_score", ascending=False).head(2)
+    early_buy = df[df["early"]].sort_values("early_score", ascending=False).head(3)
     cont_buy  = df[df["cont"]].sort_values("cont_score", ascending=False).head(2)
     hybrid    = df[(df["early"]) & (df["cont"])].sort_values("early_score", ascending=False).head(1)
 
@@ -209,13 +229,14 @@ def run():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        f"🚀 GrowthRadar v34.9",
+        f"🚀 GrowthRadar v35.0",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         ""
     ]
 
-    msg.append("💎 BUY SIGNAL\n")
+    # ← 改行削除済
+    msg.append("💎 BUY SIGNAL")
     for _, r in buy_df.iterrows():
         msg.append(f"**{r['ticker']}**")
 
