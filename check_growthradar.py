@@ -15,7 +15,7 @@ MIN_VOL = 300000
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # =========================
-# v36.4構造維持（外部ユニバース）
+# v36.4構造（外部ユニバース維持）
 # =========================
 def load_universe():
     symbols = set()
@@ -33,7 +33,6 @@ def load_universe():
     except:
         pass
 
-    # フォールバック（最低限）
     fallback = [
         "AAPL","MSFT","NVDA","AMD","AMZN","META","GOOGL","TSLA",
         "INTC","QCOM","AVGO","TSM","ASML","MU","PLTR","SNOW","CRWD"
@@ -41,7 +40,6 @@ def load_universe():
 
     symbols.update(fallback)
 
-    # シャッフル（重要：偏り防止）
     symbols = list(symbols)
     random.shuffle(symbols)
 
@@ -84,40 +82,57 @@ def fetch(session, ticker):
         accel = m1 - (m3 / 3)
         trend = (np.mean(close[-10:]) / np.mean(close[-30:])) - 1
 
+        vol_ratio = volume[-1] / (vol_base + 1e-9)
+
         # =========================
-        # v36.4-P 改良ポイント
+        # フェーズ定義（既存）
         # =========================
 
-        # AEHR型を拾うための「歪み検出」
-        structural_shift = abs(m1 - m3) > 0.35 and m1 > 0.4
+        is_early = (0.25 < m1 < 0.9 and m3 < 0.8 and accel > 0.05)
 
-        is_early = (
-            0.25 < m1 < 0.9 and
-            m3 < 0.8 and
-            accel > 0.05
-        )
-
-        # ★ここが改善ポイント
         is_transition = (
-            (m1 > 0.45 and m3 > 0.45) and
-            (abs(m1 - m3) < 0.6 or structural_shift)
+            m1 > 0.45 and m3 > 0.45 and abs(m1 - m3) < 0.6
         )
 
-        is_cont = (
-            m3 > 1.0 and trend > 0.02
+        is_cont = (m3 > 1.0 and trend > 0.02)
+
+        # =========================
+        # ★新規検出レイヤー（重要）
+        # =========================
+
+        # AEHR / BBGI型
+        breakout = (
+            m1 > 0.7 and
+            vol_ratio > 1.8 and
+            abs(m1 - m3) > 0.4
         )
 
-        if not (is_early or is_transition or is_cont):
+        # 初動スパイク（IPO/急騰初期）
+        spike_entry = (
+            m1 > 0.5 and
+            m3 < 0.6 and
+            vol_ratio > 2.0
+        )
+
+        if not (is_early or is_transition or is_cont or breakout or spike_entry):
             return None
 
-        phase = "EARLY" if is_early else "TRANSITION" if is_transition else "CONT"
+        if breakout or spike_entry:
+            phase = "BREAKOUT"
+        elif is_early:
+            phase = "EARLY"
+        elif is_transition:
+            phase = "TRANSITION"
+        else:
+            phase = "CONT"
 
         return {
             "ticker": ticker,
             "phase": phase,
             "m1": m1,
             "m3": m3,
-            "accel": accel
+            "accel": accel,
+            "vol_ratio": vol_ratio
         }
 
     except:
@@ -150,19 +165,24 @@ def run():
     early = df[df.phase == "EARLY"].sort_values("accel", ascending=False)
     trans = df[df.phase == "TRANSITION"].sort_values("m1", ascending=False)
     cont = df[df.phase == "CONT"].sort_values("m3", ascending=False)
+    breakout = df[df.phase == "BREAKOUT"].sort_values("vol_ratio", ascending=False)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v36.4-P",
+        "🚀 GrowthRadar v36.4-X",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
         "💎 BUY SIGNAL"
     ]
 
-    for _, r in early.head(3).iterrows():
+    for _, r in breakout.head(3).iterrows():
         msg.append(f"💎 {r.ticker}")
+
+    msg.append("\n🔥 BREAKOUT (NEW ENTRY)")
+    for _, r in breakout.head(10).iterrows():
+        msg.append(f"{r.ticker} M1:{r.m1:.2f} VOL:{r.vol_ratio:.2f}")
 
     msg.append("\n🔥 EARLY")
     for _, r in early.head(10).iterrows():
