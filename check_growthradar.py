@@ -83,7 +83,7 @@ def fetch(session, ticker):
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
         # =========================
-        # フェーズ（説明用）
+        # 状態分類
         # =========================
         phase = "NONE"
 
@@ -95,24 +95,48 @@ def fetch(session, ticker):
             phase = "CONT"
 
         # =========================
-        # BREAKOUT（観測のみ）
+        # BREAKOUT（監視）
         # =========================
         breakout = (
             m1 > 0.7 and vol_ratio > 1.8 and abs(m1 - m3) > 0.4
         )
 
-        score = (
+        # =========================
+        # 基本スコア
+        # =========================
+        base_score = (
             m1 * 0.6 +
             m3 * 0.3 +
             vol_ratio * 0.1
         )
 
+        # =========================
+        # 💎遷移確率モデル（核心）
+        # =========================
+        # 転換要因
+        momentum = m1
+        stability = 1 - abs(m1 - m3)          # ギャップが小さいほど安定
+        interest = min(vol_ratio / 2.0, 1.5)  # 過熱度
+        trend_bias = max(trend, 0)
+
+        transition_to_diamond = (
+            0.45 * momentum +
+            0.25 * stability +
+            0.20 * interest +
+            0.10 * trend_bias
+        )
+
+        transition_to_diamond = max(0.0, min(1.0, transition_to_diamond))
+
         return {
             "ticker": ticker,
             "phase": phase,
-            "score": score,
+            "score": base_score,
+            "m1": m1,
+            "m3": m3,
             "vol_ratio": vol_ratio,
-            "breakout": breakout
+            "breakout": breakout,
+            "p_diamond": transition_to_diamond
         }
 
     except:
@@ -145,60 +169,52 @@ def run():
     normal_df = df[~df["breakout"]]
 
     # =========================
-    # 💎（唯一の意思決定層）
+    # 💎（確率ベース選抜）
     # =========================
-    final = normal_df.sort_values("score", ascending=False).head(5)
+    final = normal_df.sort_values("p_diamond", ascending=False).head(5)
     final_set = set(final["ticker"])
-
-    # =========================
-    # 表示（重複は許容するが意味を分離）
-    # =========================
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v37.3",
+        "🚀 GrowthRadar v37.5",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
-        "💎 BUY SIGNAL（final decision）"
+        "💎 BUY SIGNAL（probability model）"
     ]
 
-    # 💎
     for _, r in final.iterrows():
-        msg.append(f"**{r.ticker}**")
+        msg.append(f"**{r.ticker}** P:{r.p_diamond:.2f}")
 
     # =========================
-    # EARLY（説明層）
+    # EARLY
     # =========================
-    msg.append("\n🔥 EARLY（setup / context）")
-    early = df[df.phase == "EARLY"].sort_values("score", ascending=False).head(4)
-    for _, r in early.iterrows():
+    msg.append("\n🔥 EARLY")
+    for _, r in df[df.phase=="EARLY"].sort_values("score", ascending=False).head(4).iterrows():
         tag = "★" if r.ticker in final_set else ""
         msg.append(f"{r.ticker}{tag} S:{r.score:.2f}")
 
     # =========================
-    # TRANSITION
+    # TRANSITION（ここが主役）
     # =========================
-    msg.append("\n⚡ TRANSITION（pre-momentum）")
-    trans = df[df.phase == "TRANSITION"].sort_values("score", ascending=False).head(4)
-    for _, r in trans.iterrows():
+    msg.append("\n⚡ TRANSITION → 💎 probability")
+    for _, r in df[df.phase=="TRANSITION"].sort_values("p_diamond", ascending=False).head(4).iterrows():
         tag = "★" if r.ticker in final_set else ""
-        msg.append(f"{r.ticker}{tag} S:{r.score:.2f}")
+        msg.append(f"{r.ticker}{tag} P:{r.p_diamond:.2f}")
 
     # =========================
     # CONT
     # =========================
-    msg.append("\n🔁 CONT（trend hold）")
-    cont = df[df.phase == "CONT"].sort_values("score", ascending=False).head(4)
-    for _, r in cont.iterrows():
+    msg.append("\n🔁 CONT")
+    for _, r in df[df.phase=="CONT"].sort_values("score", ascending=False).head(4).iterrows():
         tag = "★" if r.ticker in final_set else ""
         msg.append(f"{r.ticker}{tag} S:{r.score:.2f}")
 
     # =========================
-    # BREAKOUT（観測のみ）
+    # BREAKOUT
     # =========================
-    msg.append("\n🚀 BREAKOUT（observation only）")
+    msg.append("\n🚀 BREAKOUT")
     for _, r in breakout_df.sort_values("vol_ratio", ascending=False).head(4).iterrows():
         msg.append(f"{r.ticker} S:{r.score:.2f}")
 
