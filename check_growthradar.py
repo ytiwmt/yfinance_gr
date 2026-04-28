@@ -15,7 +15,7 @@ MIN_VOL = 300000
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # =========================
-# ユニバース（外部依存維持）
+# Universe（固定なし）
 # =========================
 def load_universe():
     symbols = set()
@@ -46,7 +46,7 @@ def load_universe():
     return symbols[:SCAN_SIZE]
 
 # =========================
-# データ取得
+# Data
 # =========================
 def fetch(session, ticker):
     try:
@@ -84,60 +84,43 @@ def fetch(session, ticker):
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
         # =========================
-        # フェーズ定義
+        # フェーズ（説明用）
         # =========================
-        is_early = (0.25 < m1 < 0.9 and m3 < 0.8 and accel > 0.05)
+        phase = "NONE"
 
-        is_transition = (
-            m1 > 0.45 and m3 > 0.45 and abs(m1 - m3) < 0.6
-        )
+        if (0.25 < m1 < 0.9 and m3 < 0.8):
+            phase = "EARLY"
+        elif (m1 > 0.45 and m3 > 0.45):
+            phase = "TRANSITION"
+        elif (m3 > 1.0 and trend > 0.02):
+            phase = "CONT"
 
-        is_cont = (m3 > 1.0 and trend > 0.02)
-
-        # =========================
-        # BREAKOUT（新規）
-        # =========================
-        breakout = (
+        # BREAKOUTはログ専用
+        breakout_flag = (
             m1 > 0.7 and vol_ratio > 1.8 and abs(m1 - m3) > 0.4
         )
 
-        spike_entry = (
-            m1 > 0.5 and m3 < 0.6 and vol_ratio > 2.0
+        # =========================
+        # 統一スコア（重要）
+        # =========================
+        score = (
+            m1 * 0.6 +
+            m3 * 0.3 +
+            vol_ratio * 0.1
         )
-
-        if not (is_early or is_transition or is_cont or breakout or spike_entry):
-            return None
-
-        if breakout or spike_entry:
-            phase = "BREAKOUT"
-        elif is_early:
-            phase = "EARLY"
-        elif is_transition:
-            phase = "TRANSITION"
-        else:
-            phase = "CONT"
 
         return {
             "ticker": ticker,
             "phase": phase,
+            "score": score,
             "m1": m1,
             "m3": m3,
-            "accel": accel,
-            "vol_ratio": vol_ratio
+            "vol_ratio": vol_ratio,
+            "breakout": breakout_flag
         }
 
     except:
         return None
-
-# =========================
-# スコア
-# =========================
-def score(row):
-    return (
-        row.get("m1", 0) * 0.6 +
-        row.get("m3", 0) * 0.3 +
-        row.get("vol_ratio", 1) * 0.1
-    )
 
 # =========================
 # 実行
@@ -162,53 +145,36 @@ def run():
         return
 
     df = pd.DataFrame(results)
-    df["score"] = df.apply(score, axis=1)
 
-    def top_n(d, n=4):
-        if len(d) == 0:
-            return d
-        return d.sort_values("score", ascending=False).head(n)
+    # =========================
+    # 💎（唯一意思決定）
+    # =========================
+    candidates = df.sort_values("score", ascending=False)
+    final = candidates.head(5)
 
-    breakout = top_n(df[df.phase == "BREAKOUT"])
-    early = top_n(df[df.phase == "EARLY"])
-    trans = top_n(df[df.phase == "TRANSITION"])
-    cont = top_n(df[df.phase == "CONT"])
+    # =========================
+    # BREAKOUTログ（監視専用）
+    # =========================
+    breakout = df[df["breakout"]].sort_values("vol_ratio", ascending=False).head(4)
 
-    final = pd.concat([breakout, early, trans, cont]).sort_values("score", ascending=False).head(5)
-
+    # =========================
+    # 出力
+    # =========================
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v37.0",
+        "🚀 GrowthRadar v37.1",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
         "💎 BUY SIGNAL"
     ]
 
-    # =========================
-    # 💎（意思決定層）
-    # =========================
     for _, r in final.iterrows():
         msg.append(f"**{r.ticker}**")
 
-    # =========================
-    # 分類（Top4制限）
-    # =========================
-    msg.append("\n🚀 BREAKOUT (Top4)")
+    msg.append("\n🚀 BREAKOUT (log)")
     for _, r in breakout.iterrows():
-        msg.append(f"{r.ticker} S:{r.score:.2f}")
-
-    msg.append("\n🔥 EARLY (Top4)")
-    for _, r in early.iterrows():
-        msg.append(f"{r.ticker} S:{r.score:.2f}")
-
-    msg.append("\n⚡ TRANSITION (Top4)")
-    for _, r in trans.iterrows():
-        msg.append(f"{r.ticker} S:{r.score:.2f}")
-
-    msg.append("\n🔁 CONT (Top4)")
-    for _, r in cont.iterrows():
         msg.append(f"{r.ticker} S:{r.score:.2f}")
 
     text = "\n".join(msg)
