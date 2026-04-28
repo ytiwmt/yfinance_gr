@@ -13,6 +13,9 @@ MIN_BASE_VOLUME = 300000
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
+# =========================
+# STATE
+# =========================
 class State:
     def __init__(self):
         self.data = self.load()
@@ -31,11 +34,9 @@ class State:
         except:
             pass
 
-    def update(self, ticker, score):
-        hist = self.data.get(ticker, [])
-        hist.append({"t": time.time(), "s": float(score)})
-        self.data[ticker] = hist[-40:]
-
+# =========================
+# UNIVERSE
+# =========================
 def load_universe():
     symbols = []
 
@@ -71,6 +72,9 @@ def load_universe():
     random.shuffle(symbols)
     return symbols[:SCAN_SIZE]
 
+# =========================
+# FETCH
+# =========================
 def fetch(session, ticker):
     try:
         if ticker.endswith(("U","W","R")):
@@ -88,7 +92,7 @@ def fetch(session, ticker):
         c = [x for x in q["close"] if x is not None]
         v = [x for x in q["volume"] if x is not None]
 
-        if len(c) < 60 or len(v) < 60:
+        if len(c) < 60:
             return None
 
         price = c[-1]
@@ -116,25 +120,24 @@ def fetch(session, ticker):
         ma30 = np.mean(c[-30:])
         trend = ret(ma10, ma30)
 
-        # ===== フェーズ分類 =====
+        # =========================
+        # フェーズ
+        # =========================
         is_early = (
-            (m1 > 0.2 and m1 < 0.72) and
+            (0.2 < m1 < 0.72) and
             (accel > 0.08) and
             (m3 < 0.8) and
             (vol_spike > 1.2)
         )
 
         is_transition = (
-            (m1 > 0.4 and m1 < 1.2) and
+            (0.4 < m1 < 1.2) and
             (m3 > 0.8) and
             (accel > 0) and
             (trend > 0.02)
         )
 
-        is_cont = (
-            (m3 > 1.0) and
-            (trend > 0.03)
-        )
+        is_cont = (m3 > 1.0 and trend > 0.03)
 
         is_hold = (m3 > 0.5 and trend > -0.02)
 
@@ -156,12 +159,14 @@ def fetch(session, ticker):
     except:
         return None
 
+# =========================
+# RUN
+# =========================
 def run():
     session = requests.Session()
     session.headers.update(HEADERS)
 
     universe = load_universe()
-
     results = []
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
@@ -177,42 +182,74 @@ def run():
 
     df = pd.DataFrame(results)
 
-    early_df = df[df["early"]].sort_values("accel", ascending=False).head(10)
-    trans_df = df[df["transition"]].sort_values("m3", ascending=False).head(10)
-    cont_df  = df[df["cont"]].sort_values("m3", ascending=False).head(10)
+    early_df = df[df["early"]].sort_values("accel", ascending=False)
+    trans_df = df[df["transition"]].sort_values("m3", ascending=False)
+    cont_df  = df[df["cont"]].sort_values("m3", ascending=False)
 
-    early_buy = early_df.head(2)
-    trans_buy = trans_df.head(2)
-    cont_buy  = cont_df.head(2)
+    # =========================
+    # BUY構築（重複排除）
+    # =========================
+    buy = []
 
-    buy_df = pd.concat([early_buy, trans_buy, cont_buy]).drop_duplicates("ticker")
+    for _, r in early_df.head(2).iterrows():
+        buy.append(r["ticker"])
 
+    for _, r in trans_df.iterrows():
+        if r["ticker"] not in buy:
+            buy.append(r["ticker"])
+        if len(buy) >= 4:
+            break
+
+    for _, r in cont_df.iterrows():
+        if r["ticker"] not in buy:
+            buy.append(r["ticker"])
+        if len(buy) >= 6:
+            break
+
+    # =========================
+    # 出力
+    # =========================
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v36.0",
+        "🚀 GrowthRadar v36.1",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
         "💎 BUY SIGNAL"
     ]
 
-    for _, r in buy_df.iterrows():
-        msg.append(f"**{r['ticker']}**")
+    for t in buy:
+        msg.append(f"**{t}**")
 
     msg.append("\n🔥 EARLY")
-    for _, r in early_df.iterrows():
+    for _, r in early_df.head(10).iterrows():
         msg.append(f"{r['ticker']} A:{r['accel']:.2f} M1:{r['m1']:.2f}")
 
     msg.append("\n⚡ TRANSITION")
-    for _, r in trans_df.iterrows():
+    for _, r in trans_df.head(10).iterrows():
         msg.append(f"{r['ticker']} M1:{r['m1']:.2f} M3:{r['m3']:.2f}")
 
     msg.append("\n🔁 CONT")
-    for _, r in cont_df.iterrows():
+    for _, r in cont_df.head(10).iterrows():
         msg.append(f"{r['ticker']} M3:{r['m3']:.2f}")
 
-    print("\n".join(msg))
+    text = "\n".join(msg)
+
+    print(text)
+
+    # =========================
+    # NOTIFICATION（ここが修正済み）
+    # =========================
+    if WEBHOOK_URL:
+        try:
+            if len(text) > 1900:
+                text = text[:1900] + "\n…(truncated)"
+            r = requests.post(WEBHOOK_URL, json={"content": text})
+            if r.status_code != 204:
+                print("Webhook error:", r.status_code, r.text)
+        except Exception as e:
+            print("Webhook exception:", e)
 
 if __name__ == "__main__":
     run()
