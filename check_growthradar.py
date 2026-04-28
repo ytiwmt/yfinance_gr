@@ -1,14 +1,9 @@
-import os, requests, random, re, json
+import os, requests, random, re
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import numpy as np
-import redis
 
-# =========================
-# CONFIG
-# =========================
-REDIS_URL = os.environ.get("REDIS_URL")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
 
 SCAN_SIZE = 1500
@@ -17,25 +12,23 @@ MAX_WORKERS = 12
 MIN_PRICE = 5.0
 MIN_VOL = 300000
 
-r = redis.from_url(REDIS_URL, decode_responses=True)
-
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # =========================
-# UNIVERSE
+# Universe
 # =========================
 def load_universe():
     symbols = set()
 
     try:
         url = "https://raw.githubusercontent.com/datasets/nasdaq-listings/master/data/nasdaq-listed-symbols.csv"
-        res = requests.get(url, timeout=10)
-        lines = res.text.splitlines()[1:]
+        r = requests.get(url, timeout=10)
+        lines = r.text.splitlines()[1:]
 
         for l in lines:
-            s = l.split(",")[0].strip().upper()
-            if re.match(r"^[A-Z]{1,6}$", s):
-                symbols.add(s)
+            sym = l.split(",")[0].strip().upper()
+            if re.match(r"^[A-Z]{1,6}$", sym):
+                symbols.add(sym)
     except:
         pass
 
@@ -45,43 +38,39 @@ def load_universe():
     ]
 
     symbols.update(fallback)
+
     symbols = list(symbols)
     random.shuffle(symbols)
 
     return symbols[:SCAN_SIZE]
 
 # =========================
-# REDIS STATE
-# =========================
-def get_state(ticker):
-    raw = r.get(f"gr:{ticker}:state")
-    return json.loads(raw) if raw else {}
-
-def set_state(ticker, state):
-    r.set(f"gr:{ticker}:state", json.dumps(state))
-
-# =========================
-# FEATURE ENGINE
+# Fetch
 # =========================
 def fetch(session, ticker):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=6mo&interval=1d"
-        res = session.get(url, timeout=5)
-        if res.status_code != 200:
+        r = session.get(url, timeout=5)
+        if r.status_code != 200:
             return None
 
-        data = res.json()["chart"]["result"][0]
+        data = r.json()["chart"]["result"][0]
+
         close = data["indicators"]["quote"][0]["close"]
         volume = data["indicators"]["quote"][0]["volume"]
 
-        close = [x for x in close if x]
-        volume = [x for x in volume if x]
+        close = [x for x in close if x is not None]
+        volume = [x for x in volume if x is not None]
 
         if len(close) < 60:
             return None
 
         price = close[-1]
         if price < MIN_PRICE:
+            return None
+
+        # safety fix（ここ重要）
+        if len(volume[-20:-5]) == 0:
             return None
 
         vol_base = np.mean(volume[-20:-5])
@@ -95,87 +84,77 @@ def fetch(session, ticker):
 
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
+        # =========================
+        # PHASES
+        # =========================
+        phase = "NONE"
+
+        if (0.25 < m1 < 0.7 and m3 < 0.6):
+            phase = "EARLY"
+
+        elif (m1 > 0.45 and m3 > 0.45):
+            phase = "TRANSITION"
+
+        elif (m3 > 1.0):
+            phase = "CONT"
+
+        # =========================
+        # BREAKOUT (event only)
+        # =========================
+        breakout_event = (
+            vol_ratio > 2.0 and
+            abs(close[-1] - close[-2]) / close[-2] > 0.03
+        )
+
+        score = (
+            m1 * 0.6 +
+            m3 * 0.3 +
+            vol_ratio * 0.1
+        )
+
         return {
             "ticker": ticker,
-            "price": price,
+            "phase": phase,
+            "score": score,
             "m1": m1,
             "m3": m3,
             "vol_ratio": vol_ratio,
-            "close": close[-1],
-            "volume": volume[-1]
+            "breakout": breakout_event
         }
 
     except:
         return None
 
 # =========================
-# STATE MACHINE
-# =========================
-def transition_engine(t, feat):
-    state = get_state(t)
-
-    prev_close = state.get("last_close")
-    prev_vol = state.get("last_volume")
-    prev_state = state.get("last_state", "NONE")
-
-    breakout_flag = False
-
-    # =========================
-    # BREAKOUT (EVENT ONLY)
-    # =========================
-    if prev_close and prev_vol:
-        price_jump = abs(feat["close"] - prev_close) / prev_close
-        vol_spike = feat["volume"] / (prev_vol + 1e-9)
-
-        breakout_flag = (price_jump > 0.03 and vol_spike > 2.2)
-
-    # =========================
-    # STATE TRANSITIONS
-    # =========================
-    new_state = prev_state
-
-    if breakout_flag:
-        new_state = "BREAKOUT"
-
-    elif prev_state == "BREAKOUT":
-        new_state = "EARLY"
-
-    elif feat["m1"] > 0.45 and feat["m3"] > 0.45:
-        new_state = "TRANSITION"
-
-    elif feat["m3"] > 1.0:
-        new_state = "CONT"
-
-    # =========================
-    # UPDATE REDIS
-    # =========================
-    new_state_obj = {
-        "last_close": feat["close"],
-        "last_volume": feat["volume"],
-        "last_state": new_state,
-        "last_update": datetime.now().isoformat()
-    }
-
-    set_state(t, new_state_obj)
-
-    return {
-        "ticker": t,
-        "state": new_state,
-        "m1": feat["m1"],
-        "m3": feat["m3"],
-        "vol_ratio": feat["vol_ratio"],
-        "breakout": breakout_flag
-    }
-
-# =========================
-# DIAMOND SELECTION
+# DIAMOND
 # =========================
 def build_diamond(df):
-    trans = [x for x in df if x["state"] == "TRANSITION"]
+    trans = df[df.phase == "TRANSITION"].copy()
 
-    trans = sorted(trans, key=lambda x: x["m1"], reverse=True)
+    if len(trans) == 0:
+        return pd.DataFrame()
 
-    return trans[:5]
+    trans = trans.sort_values("score", ascending=False)
+
+    diamond = []
+    prev = None
+
+    for _, r in trans.iterrows():
+        gap = 0.0 if prev is None else prev.score - r.score
+
+        if prev is None or gap >= 0.15 or r.score > trans.score.quantile(0.85):
+            diamond.append({
+                "ticker": r.ticker,
+                "score": r.score,
+                "gap": gap
+            })
+
+        prev = r
+
+        if len(diamond) >= 5:
+            break
+
+    return pd.DataFrame(diamond)
 
 # =========================
 # RUN
@@ -188,49 +167,53 @@ def run():
     results = []
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futs = {ex.submit(fetch, session, t): t for t in universe}
-        for f in as_completed(futs):
+        futures = {ex.submit(fetch, session, t): t for t in universe}
+        for f in as_completed(futures):
             r = f.result()
             if r:
-                out = transition_engine(r["ticker"], r)
-                results.append(out)
+                results.append(r)
+
+    if not results:
+        print("NO DATA")
+        return
+
+    df = pd.DataFrame(results)
+
+    diamond = build_diamond(df)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    diamond = build_diamond(results)
-
     msg = [
-        "🚀 GrowthRadar v38 (STATE TRANSITION ENGINE)",
-        f"Scan:{len(universe)} Valid:{len(results)}",
+        "🚀 GrowthRadar v37.7 (STABLE MODEL)",
+        f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
         "💎 BUY SIGNAL"
     ]
 
-    if not diamond:
+    if len(diamond) == 0:
         msg.append("None")
     else:
-        for d in diamond:
-            msg.append(f"**{d['ticker']}** M1:{d['m1']:.2f}")
+        for _, r in diamond.iterrows():
+            msg.append(f"**{r.ticker}** S:{r.score:.2f} GAP:{r.gap:.2f}")
 
-    early = [x for x in results if x["state"] == "EARLY"][:4]
+    early = df[df.phase=="EARLY"].sort_values("score", ascending=False).head(4)
     msg.append("\n🔥 EARLY")
-    msg += [f"{x['ticker']}" for x in early] or ["None"]
+    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in early.iterrows()] or ["None"]
 
-    trans = [x for x in results if x["state"] == "TRANSITION"][:4]
+    trans = df[df.phase=="TRANSITION"].sort_values("score", ascending=False).head(4)
     msg.append("\n⚡ TRANSITION")
-    msg += [f"{x['ticker']}" for x in trans] or ["None"]
+    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in trans.iterrows()] or ["None"]
 
-    cont = [x for x in results if x["state"] == "CONT"][:4]
+    cont = df[df.phase=="CONT"].sort_values("score", ascending=False).head(4)
     msg.append("\n🔁 CONT")
-    msg += [f"{x['ticker']}" for x in cont] or ["None"]
+    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in cont.iterrows()] or ["None"]
 
-    breakout = [x for x in results if x["breakout"]][:4]
-    msg.append("\n🧨 BREAKOUT (event log)")
-    msg += [f"{x['ticker']}" for x in breakout] or ["None"]
+    brk = df[df.breakout].head(4)
+    msg.append("\n🧨 BREAKOUT (event)")
+    msg += [f"{r.ticker}" for _, r in brk.iterrows()] or ["None"]
 
-    # ★必ず空行
-    msg.append("")
+    msg.append("")  # 最終空行
 
     text = "\n".join(msg)
 
