@@ -25,4 +25,4 @@ jobs:
           REDIS_URL: ${{ secrets.REDIS_URL }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
         run: |
-          python growthradar.py
+          python check_growthradar.py
