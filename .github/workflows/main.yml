@@ -23,6 +23,6 @@ jobs:
       - name: Run GrowthRadar
         env:
           REDIS_URL: ${{ secrets.REDIS_URL }}
-          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL_GROWTHRADAR }}
         run: |
           python check_growthradar.py
