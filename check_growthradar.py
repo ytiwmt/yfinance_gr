@@ -90,36 +90,42 @@ def fetch(session, ticker):
         trend = ret(ma10, ma30)
 
         # =========================
-        # フェーズ（完全版）
+        # フェーズ（完全排他）
         # =========================
 
-        is_early = (
+        phase = None
+
+        # EARLY（最優先）
+        if (
             0.2 < m1 < 0.8 and
             m3 < 0.9 and
             accel > 0.08
-        )
+        ):
+            phase = "EARLY"
 
-        is_transition = (
+        # TRANSITION（中間状態）
+        elif (
             m1 > 0.4 and
             m3 > 0.6 and
             abs(m1 - m3) <= 0.35 and
             trend > 0.02
-        )
+        ):
+            phase = "TRANSITION"
 
-        is_cont = (
+        # CONT（トレンド確定）
+        elif (
             m3 > 1.0 and
             m1 < m3 and
             trend > 0.03
-        )
+        ):
+            phase = "CONT"
 
-        if not (is_early or is_transition or is_cont):
+        else:
             return None
 
         return {
             "ticker": ticker,
-            "early": is_early,
-            "transition": is_transition,
-            "cont": is_cont,
+            "phase": phase,
             "m1": m1,
             "m3": m3,
             "accel": accel,
@@ -130,7 +136,7 @@ def fetch(session, ticker):
         return None
 
 # =========================
-# MAIN
+# RUN
 # =========================
 def run():
     session = requests.Session()
@@ -152,12 +158,12 @@ def run():
 
     df = pd.DataFrame(results)
 
-    early_df = df[df["early"]].sort_values("accel", ascending=False)
-    trans_df = df[df["transition"]].sort_values("m3", ascending=False)
-    cont_df  = df[df["cont"]].sort_values("m3", ascending=False)
+    early_df = df[df["phase"] == "EARLY"].sort_values("accel", ascending=False)
+    trans_df = df[df["phase"] == "TRANSITION"].sort_values("m3", ascending=False)
+    cont_df  = df[df["phase"] == "CONT"].sort_values("m3", ascending=False)
 
     # =========================
-    # BUY（完全排他）
+    # BUY（完全状態制御）
     # =========================
     buy = []
 
@@ -182,7 +188,7 @@ def run():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v36.3",
+        "🚀 GrowthRadar v36.4",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
@@ -208,9 +214,6 @@ def run():
 
     print(text)
 
-    # =========================
-    # NOTIFICATION
-    # =========================
     if WEBHOOK_URL:
         try:
             if len(text) > 1900:
