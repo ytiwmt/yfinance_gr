@@ -3,8 +3,6 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-STATE_FILE = "growth_state_v36.json"
-
 SCAN_SIZE = 1500
 MAX_WORKERS = 14
 
@@ -13,30 +11,6 @@ MIN_BASE_VOLUME = 300000
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# =========================
-# STATE
-# =========================
-class State:
-    def __init__(self):
-        self.data = self.load()
-
-    def load(self):
-        if os.path.exists(STATE_FILE):
-            try:
-                return json.load(open(STATE_FILE))
-            except:
-                return {}
-        return {}
-
-    def save(self):
-        try:
-            json.dump(self.data, open(STATE_FILE, "w"))
-        except:
-            pass
-
-# =========================
-# UNIVERSE
-# =========================
 def load_universe():
     symbols = []
 
@@ -72,14 +46,9 @@ def load_universe():
     random.shuffle(symbols)
     return symbols[:SCAN_SIZE]
 
-# =========================
-# FETCH
-# =========================
+
 def fetch(session, ticker):
     try:
-        if ticker.endswith(("U","W","R")):
-            return None
-
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=6mo&interval=1d"
         r = session.get(url, timeout=5)
         if r.status_code != 200:
@@ -104,44 +73,22 @@ def fetch(session, ticker):
         if vol_base < MIN_BASE_VOLUME:
             return None
 
-        vol_spike = vol_now / (vol_base + 1e-9)
-
         def ret(a,b): return (a/b - 1) if b > 0 else 0
 
         m1 = ret(price, c[-21])
         m3 = ret(price, c[-63])
         accel = m1 - (m3 / 3)
 
-        volatility = np.std(c[-10:]) / price
-        if volatility > 0.18:
-            return None
-
         ma10 = np.mean(c[-10:])
         ma30 = np.mean(c[-30:])
         trend = ret(ma10, ma30)
 
-        # =========================
-        # フェーズ
-        # =========================
-        is_early = (
-            (0.2 < m1 < 0.72) and
-            (accel > 0.08) and
-            (m3 < 0.8) and
-            (vol_spike > 1.2)
-        )
-
-        is_transition = (
-            (0.4 < m1 < 1.2) and
-            (m3 > 0.8) and
-            (accel > 0) and
-            (trend > 0.02)
-        )
-
+        # ===== フェーズ =====
+        is_early = (0.2 < m1 < 0.72 and accel > 0.08 and m3 < 0.8)
+        is_transition = (0.4 < m1 < 1.2 and m3 > 0.8 and accel > 0 and trend > 0.02)
         is_cont = (m3 > 1.0 and trend > 0.03)
 
-        is_hold = (m3 > 0.5 and trend > -0.02)
-
-        if not (is_early or is_transition or is_cont or is_hold):
+        if not (is_early or is_transition or is_cont):
             return None
 
         return {
@@ -149,19 +96,15 @@ def fetch(session, ticker):
             "early": is_early,
             "transition": is_transition,
             "cont": is_cont,
-            "hold": is_hold,
             "m1": m1,
             "m3": m3,
-            "accel": accel,
-            "trend": trend
+            "accel": accel
         }
 
     except:
         return None
 
-# =========================
-# RUN
-# =========================
+
 def run():
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -176,10 +119,6 @@ def run():
             if r:
                 results.append(r)
 
-    if not results:
-        print("NO DATA")
-        return
-
     df = pd.DataFrame(results)
 
     early_df = df[df["early"]].sort_values("accel", ascending=False)
@@ -187,7 +126,7 @@ def run():
     cont_df  = df[df["cont"]].sort_values("m3", ascending=False)
 
     # =========================
-    # BUY構築（重複排除）
+    # BUY（優先順位制御）
     # =========================
     buy = []
 
@@ -206,13 +145,10 @@ def run():
         if len(buy) >= 6:
             break
 
-    # =========================
-    # 出力
-    # =========================
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v36.1",
+        "🚀 GrowthRadar v36.2",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
@@ -238,18 +174,14 @@ def run():
 
     print(text)
 
-    # =========================
-    # NOTIFICATION（ここが修正済み）
-    # =========================
     if WEBHOOK_URL:
         try:
             if len(text) > 1900:
-                text = text[:1900] + "\n…(truncated)"
-            r = requests.post(WEBHOOK_URL, json={"content": text})
-            if r.status_code != 204:
-                print("Webhook error:", r.status_code, r.text)
+                text = text[:1900] + "\n…"
+            requests.post(WEBHOOK_URL, json={"content": text})
         except Exception as e:
-            print("Webhook exception:", e)
+            print("Webhook error:", e)
+
 
 if __name__ == "__main__":
     run()
