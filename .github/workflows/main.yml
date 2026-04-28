@@ -2,11 +2,11 @@ name: GrowthRadar
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "0 */3 * * *"
+  workflow_dispatch:
   push:
     branches:
       - main
-  workflow_dispatch:
 
 jobs:
   run:
