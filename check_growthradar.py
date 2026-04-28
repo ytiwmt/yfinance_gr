@@ -79,31 +79,35 @@ def fetch(session, ticker):
         m1 = ret(close[-1], close[-21])
         m3 = ret(close[-1], close[-63])
 
-        trend = (np.mean(close[-10:]) / np.mean(close[-30:])) - 1
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
         # =========================
-        # Phase re-balanced
+        # PHASES (clean separation)
         # =========================
 
         phase = "NONE"
 
-        # BREAKOUT（初動・変化検知）
-        breakout = (
-            m1 > 0.25 and m1 < 0.8 and vol_ratio > 1.5
-        )
-
-        # EARLY（形成途中）
         if (0.25 < m1 < 0.7 and m3 < 0.6):
             phase = "EARLY"
 
-        # TRANSITION（加速前）
         elif (m1 > 0.45 and m3 > 0.45):
             phase = "TRANSITION"
 
-        # CONT（トレンド）
-        elif (m3 > 1.0 and trend > 0.02):
+        elif (m3 > 1.0):
             phase = "CONT"
+
+        # =========================
+        # BREAKOUT (EVENT ONLY)
+        # =========================
+        # ← ここが完全に変更点
+
+        breakout_event = (
+            vol_ratio > 2.0 and
+            abs(close[-1] - close[-2]) / close[-2] > 0.03
+        )
+
+        # 「強さ」を一切使わない
+        # 「時間的変化だけ」を使う
 
         score = (
             m1 * 0.6 +
@@ -118,14 +122,14 @@ def fetch(session, ticker):
             "m1": m1,
             "m3": m3,
             "vol_ratio": vol_ratio,
-            "breakout": breakout
+            "breakout": breakout_event
         }
 
     except:
         return None
 
 # =========================
-# DIAMOND (diff保持)
+# DIFF DIAMOND (unchanged)
 # =========================
 def build_diamond(df):
     trans = df[df.phase == "TRANSITION"].copy()
@@ -183,7 +187,7 @@ def run():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v37.6 (fixed flow model)",
+        "🚀 GrowthRadar v37.7 (EVENT-DRIVEN BREAKOUT)",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
@@ -208,9 +212,10 @@ def run():
     msg.append("\n🔁 CONT")
     msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in cont.iterrows()] or ["None"]
 
-    brk = df[df.breakout].sort_values("vol_ratio", ascending=False).head(4)
-    msg.append("\n🧨 BREAKOUT")
-    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in brk.iterrows()] or ["None"]
+    # BREAKOUT = event log only
+    brk = df[df.breakout].head(4)
+    msg.append("\n🧨 BREAKOUT (event)")
+    msg += [f"{r.ticker}" for _, r in brk.iterrows()] or ["None"]
 
     msg.append("")
 
