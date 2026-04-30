@@ -98,7 +98,7 @@ def fetch(session, ticker):
             phase = "CONT"
 
         # =========================
-        # BREAKOUT (stable event)
+        # BREAKOUT
         # =========================
         price_jump = abs(close[-1] - close[-2]) / close[-2]
         vol_spike_1 = volume[-1] / (vol_base + 1e-9)
@@ -114,7 +114,7 @@ def fetch(session, ticker):
         )
 
         # =========================
-        # SCORE
+        # BASE SCORE
         # =========================
         score = (
             m1 * 0.6 +
@@ -166,20 +166,25 @@ def build_diamond(df):
     return diamond
 
 # =========================
-# BUY FILTER (v37.9 FIX)
+# BUY (v37.10 FIXED MODEL)
 # =========================
 def build_buy(df):
-    buy = df[df.phase == "TRANSITION"].copy()
+    buy = df.copy()
 
-    if len(buy) == 0:
-        return []
+    # ★統合評価（全レイヤーを入力）
+    buy["buy_score"] = (
+        buy["score"] +
+        buy["m1"] * 0.5 +
+        buy["m3"] * 0.3 +
+        buy["vol_ratio"] * 0.2 +
+        (buy["phase"] == "EARLY") * 0.3 +
+        (buy["phase"] == "TRANSITION") * 0.6 +
+        (buy["phase"] == "CONT") * 0.4 +
+        buy["breakout"] * 0.8
+    )
 
-    threshold = buy["score"].quantile(0.90)
-    buy = buy[buy["score"] >= threshold]
-
-    buy = buy.sort_values("score", ascending=False)
-
-    return buy.to_dict("records")
+    buy = buy.sort_values("buy_score", ascending=False)
+    return buy.head(5).to_dict("records")
 
 # =========================
 # RUN
@@ -210,7 +215,7 @@ def run():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = []
-    msg.append("🚀 GrowthRadar v37.9 (FINAL BUY FIX)")
+    msg.append("🚀 GrowthRadar v37.10 (BUY INTEGRATED MODEL)")
     msg.append(f"Scan:{len(universe)} Valid:{len(df)}")
     msg.append(f"Time:{now}")
     msg.append("")
@@ -218,7 +223,7 @@ def run():
     msg.append("💎 BUY SIGNAL")
     if buy:
         for b in buy:
-            msg.append(f"**{b['ticker']}** S:{b['score']:.2f}")
+            msg.append(f"**{b['ticker']}** S:{b['buy_score']:.2f}")
     else:
         msg.append("None")
 
