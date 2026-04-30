@@ -113,11 +113,18 @@ def fetch(session, ticker):
         # =========================
         # BASE SCORE
         # =========================
-        score = (
+        raw_score = (
             m1 * 0.6 +
             m3 * 0.3 +
-            vol_ratio * 0.1
+            vol_ratio * 0.1 +
+            breakout * 0.4
         )
+
+        # =========================
+        # FINAL STABLE NORMALIZATION (v37.16)
+        # =========================
+        # ★ここが唯一の安定化ロジック
+        score = 8.5 * (1 - np.exp(-raw_score / 8.5))
 
         return {
             "ticker": ticker,
@@ -163,18 +170,10 @@ def build_diamond(df):
     return diamond
 
 # =========================
-# BUY SCORE (v37.15 FIXED NORMALIZATION)
+# BUY
 # =========================
 def build_buy(df):
     buy = df.copy()
-
-    base = (
-        buy["score"] +
-        buy["m1"] * 0.5 +
-        buy["m3"] * 0.3 +
-        buy["vol_ratio"] * 0.2 +
-        buy["breakout"] * 0.4
-    )
 
     structure = (
         (buy["phase"] == "TRANSITION") * 0.9 +
@@ -189,18 +188,13 @@ def build_buy(df):
         (buy["breakout"])
     ) * 0.2
 
-    raw_score = base + structure * 0.6 - redundancy_penalty
+    buy_score = (
+        buy["score"] +
+        structure * 0.6 -
+        redundancy_penalty
+    )
 
-    # =========================
-    # ★ v37.15 CORE FIX
-    # =========================
-    # ① soft normalization (dominance suppression)
-    normalized = 8.0 * (1 - np.exp(-raw_score / 8.0))
-
-    # ② z-like stabilization (cross-ticker balance)
-    normalized = (normalized - normalized.mean()) / (normalized.std() + 1e-9) + 5.0
-
-    buy["buy_score"] = normalized
+    buy["buy_score"] = buy_score
 
     buy = buy.sort_values("buy_score", ascending=False)
 
@@ -229,13 +223,13 @@ def run():
 
     df = pd.DataFrame(results)
 
-    diamond = build_diamond(df)
     buy = build_buy(df)
+    diamond = build_diamond(df)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = []
-    msg.append("🚀 GrowthRadar v37.15 (FINAL NORMALIZATION FIX)")
+    msg.append("🚀 GrowthRadar v37.16 (FINAL STABLE SCORE MODEL)")
     msg.append(f"Scan:{len(universe)} Valid:{len(df)}")
     msg.append(f"Time:{now}")
     msg.append("")
