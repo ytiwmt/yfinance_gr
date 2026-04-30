@@ -98,21 +98,16 @@ def fetch(session, ticker):
             phase = "CONT"
 
         # =========================
-        # BREAKOUT (FIXED v37.8)
+        # BREAKOUT (stable event)
         # =========================
-
-        price_jump_1 = abs(close[-1] - close[-2]) / close[-2]
-        price_jump_2 = abs(close[-2] - close[-3]) / close[-3]
-
+        price_jump = abs(close[-1] - close[-2]) / close[-2]
         vol_spike_1 = volume[-1] / (vol_base + 1e-9)
         vol_spike_2 = volume[-2] / (vol_base + 1e-9)
 
-        trend_ok = (
-            close[-1] > close[-2] > close[-3]
-        )
+        trend_ok = close[-1] > close[-2] > close[-3]
 
         breakout = (
-            price_jump_1 > 0.03 and
+            price_jump > 0.03 and
             vol_spike_1 > 2.0 and
             vol_spike_2 > 1.5 and
             trend_ok
@@ -165,11 +160,26 @@ def build_diamond(df):
             })
 
         prev = r
-
         if len(diamond) >= 5:
             break
 
     return diamond
+
+# =========================
+# BUY FILTER (v37.9 FIX)
+# =========================
+def build_buy(df):
+    buy = df[df.phase == "TRANSITION"].copy()
+
+    if len(buy) == 0:
+        return []
+
+    threshold = buy["score"].quantile(0.90)
+    buy = buy[buy["score"] >= threshold]
+
+    buy = buy.sort_values("score", ascending=False)
+
+    return buy.to_dict("records")
 
 # =========================
 # RUN
@@ -195,40 +205,41 @@ def run():
     df = pd.DataFrame(results)
 
     diamond = build_diamond(df)
+    buy = build_buy(df)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = []
-    msg.append("🚀 GrowthRadar v37.8 (BREAKOUT FIXED)")
+    msg.append("🚀 GrowthRadar v37.9 (FINAL BUY FIX)")
     msg.append(f"Scan:{len(universe)} Valid:{len(df)}")
     msg.append(f"Time:{now}")
     msg.append("")
 
     msg.append("💎 BUY SIGNAL")
-    if diamond:
-        for d in diamond:
-            msg.append(f"**{d['ticker']}** S:{d['score']:.2f} GAP:{d['gap']:.2f}")
+    if buy:
+        for b in buy:
+            msg.append(f"**{b['ticker']}** S:{b['score']:.2f}")
     else:
         msg.append("None")
 
-    early = df[df.phase=="EARLY"].sort_values("score", ascending=False).head(4)
     msg.append("")
     msg.append("🔥 EARLY")
+    early = df[df.phase=="EARLY"].sort_values("score", ascending=False).head(4)
     msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in early.iterrows()] or ["None"]
 
-    trans = df[df.phase=="TRANSITION"].sort_values("score", ascending=False).head(4)
     msg.append("")
     msg.append("⚡ TRANSITION")
+    trans = df[df.phase=="TRANSITION"].sort_values("score", ascending=False).head(4)
     msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in trans.iterrows()] or ["None"]
 
-    cont = df[df.phase=="CONT"].sort_values("score", ascending=False).head(4)
     msg.append("")
     msg.append("🔁 CONT")
+    cont = df[df.phase=="CONT"].sort_values("score", ascending=False).head(4)
     msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in cont.iterrows()] or ["None"]
 
-    brk = df[df.breakout].head(4)
     msg.append("")
     msg.append("🧨 BREAKOUT (event)")
+    brk = df[df.breakout].head(4)
     msg += [f"{r.ticker}" for _, r in brk.iterrows()] or ["None"]
 
     text = "\n".join(msg)
