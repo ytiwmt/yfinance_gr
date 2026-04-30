@@ -84,25 +84,43 @@ def fetch(session, ticker):
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
         # =========================
-        # PHASE
+        # PHASES
         # =========================
         phase = "NONE"
 
         if (0.25 < m1 < 0.7 and m3 < 0.6):
             phase = "EARLY"
+
         elif (m1 > 0.45 and m3 > 0.45):
             phase = "TRANSITION"
+
         elif (m3 > 1.0):
             phase = "CONT"
 
         # =========================
-        # BREAKOUT (EVENT ONLY)
+        # BREAKOUT (FIXED v37.8)
         # =========================
-        breakout = (
-            abs(close[-1] - close[-2]) / close[-2] > 0.03 and
-            vol_ratio > 2.0
+
+        price_jump_1 = abs(close[-1] - close[-2]) / close[-2]
+        price_jump_2 = abs(close[-2] - close[-3]) / close[-3]
+
+        vol_spike_1 = volume[-1] / (vol_base + 1e-9)
+        vol_spike_2 = volume[-2] / (vol_base + 1e-9)
+
+        trend_ok = (
+            close[-1] > close[-2] > close[-3]
         )
 
+        breakout = (
+            price_jump_1 > 0.03 and
+            vol_spike_1 > 2.0 and
+            vol_spike_2 > 1.5 and
+            trend_ok
+        )
+
+        # =========================
+        # SCORE
+        # =========================
         score = (
             m1 * 0.6 +
             m3 * 0.3 +
@@ -147,6 +165,7 @@ def build_diamond(df):
             })
 
         prev = r
+
         if len(diamond) >= 5:
             break
 
@@ -180,7 +199,7 @@ def run():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = []
-    msg.append("🚀 GrowthRadar v37.8 (FIXED OUTPUT)")
+    msg.append("🚀 GrowthRadar v37.8 (BREAKOUT FIXED)")
     msg.append(f"Scan:{len(universe)} Valid:{len(df)}")
     msg.append(f"Time:{now}")
     msg.append("")
