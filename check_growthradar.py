@@ -98,20 +98,16 @@ def fetch(session, ticker):
             phase = "CONT"
 
         # =========================
-        # BREAKOUT (v37.13 FIX)
+        # BREAKOUT (stable)
         # =========================
         price_jump = abs(close[-1] - close[-2]) / close[-2]
         vol_spike_1 = volume[-1] / (vol_base + 1e-9)
 
         trend_ok = close[-1] > close[-2] > close[-3]
 
-        # ★調整ポイント（軽く広げるだけ）
         breakout = (
-            (
-                price_jump > 0.02 and vol_spike_1 > 1.8
-            ) or (
-                price_jump > 0.015 and vol_spike_1 > 2.3
-            )
+            (price_jump > 0.02 and vol_spike_1 > 1.8) or
+            (price_jump > 0.015 and vol_spike_1 > 2.3)
         ) and trend_ok
 
         # =========================
@@ -167,7 +163,7 @@ def build_diamond(df):
     return diamond
 
 # =========================
-# BUY (unchanged logic)
+# BUY (v37.14 FINAL FIX)
 # =========================
 def build_buy(df):
     buy = df.copy()
@@ -177,16 +173,30 @@ def build_buy(df):
         buy["m1"] * 0.5 +
         buy["m3"] * 0.3 +
         buy["vol_ratio"] * 0.2 +
-        buy["breakout"] * 0.6
+        buy["breakout"] * 0.4
     )
 
+    # =========================
+    # STRUCTURE SCORE
+    # =========================
     structure = (
         (buy["phase"] == "TRANSITION") * 0.9 +
         (buy["phase"] == "CONT") * 0.6 +
         (buy["phase"] == "EARLY") * 0.15
     )
 
-    buy["buy_score"] = base + structure * 0.6
+    # =========================
+    # ★ v37.14 핵심修正：飽和制御
+    # =========================
+    structure = np.minimum(structure, 1.1)
+
+    # ★重複過多銘柄の暴走抑制
+    redundancy_penalty = (
+        (buy["phase"] == "TRANSITION") &
+        (buy["breakout"])
+    ) * 0.2
+
+    buy["buy_score"] = base + structure * 0.6 - redundancy_penalty
 
     buy = buy.sort_values("buy_score", ascending=False)
 
@@ -221,7 +231,7 @@ def run():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = []
-    msg.append("🚀 GrowthRadar v37.13 (BREAKOUT TUNED FINAL)")
+    msg.append("🚀 GrowthRadar v37.14 (FINAL SATURATION CONTROL)")
     msg.append(f"Scan:{len(universe)} Valid:{len(df)}")
     msg.append(f"Time:{now}")
     msg.append("")
