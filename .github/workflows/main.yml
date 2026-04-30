@@ -2,7 +2,7 @@ name: GrowthRadar
 
 on:
   schedule:
-    - cron: "0 */3 * * *"
+    - cron: "0 */3 * * *"   # 3時間ごと
   workflow_dispatch:
   push:
     branches:
@@ -21,7 +21,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests numpy pandas
+          python -m pip install --upgrade pip
+          python -m pip install requests redis numpy pandas
 
       - name: Run GrowthRadar
         env:
