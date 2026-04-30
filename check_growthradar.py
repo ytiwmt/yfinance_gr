@@ -136,34 +136,6 @@ def fetch(session, ticker):
         return None
 
 # =========================
-# BUY (v37.11 FIXED PRECISION)
-# =========================
-def build_buy(df):
-    buy = df.copy()
-
-    # --- 統合スコア（v37.10ベース） ---
-    base = (
-        buy["score"] +
-        buy["m1"] * 0.5 +
-        buy["m3"] * 0.3 +
-        buy["vol_ratio"] * 0.2 +
-        (buy["breakout"]) * 0.6
-    )
-
-    # --- 安定補正（ここがv37.11の追加） ---
-    stability = (
-        (buy["phase"] == "TRANSITION") * 0.8 +
-        (buy["phase"] == "CONT") * 0.5 +
-        (buy["phase"] == "EARLY") * 0.2
-    )
-
-    buy["buy_score"] = base + stability
-
-    buy = buy.sort_values("buy_score", ascending=False)
-
-    return buy.head(5).to_dict("records")
-
-# =========================
 # DIAMOND
 # =========================
 def build_diamond(df):
@@ -194,6 +166,34 @@ def build_diamond(df):
     return diamond
 
 # =========================
+# BUY (v37.12 FINAL STABLE)
+# =========================
+def build_buy(df):
+    buy = df.copy()
+
+    base = (
+        buy["score"] +
+        buy["m1"] * 0.5 +
+        buy["m3"] * 0.3 +
+        buy["vol_ratio"] * 0.2 +
+        buy["breakout"] * 0.6
+    )
+
+    # ★軽い構造補正（過剰イベント抑制）
+    structure = (
+        (buy["phase"] == "TRANSITION") * 0.9 +
+        (buy["phase"] == "CONT") * 0.6 +
+        (buy["phase"] == "EARLY") * 0.15
+    )
+
+    # ★ここがv37.12の唯一の調整ポイント
+    buy["buy_score"] = base + structure * 0.6
+
+    buy = buy.sort_values("buy_score", ascending=False)
+
+    return buy.head(5).to_dict("records")
+
+# =========================
 # RUN
 # =========================
 def run():
@@ -222,7 +222,7 @@ def run():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = []
-    msg.append("🚀 GrowthRadar v37.11 (BUY PRECISION FIX)")
+    msg.append("🚀 GrowthRadar v37.12 (FINAL STRUCTURE TUNED)")
     msg.append(f"Scan:{len(universe)} Valid:{len(df)}")
     msg.append(f"Time:{now}")
     msg.append("")
