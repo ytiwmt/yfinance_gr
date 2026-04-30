@@ -98,20 +98,21 @@ def fetch(session, ticker):
             phase = "CONT"
 
         # =========================
-        # BREAKOUT
+        # BREAKOUT (v37.13 FIX)
         # =========================
         price_jump = abs(close[-1] - close[-2]) / close[-2]
         vol_spike_1 = volume[-1] / (vol_base + 1e-9)
-        vol_spike_2 = volume[-2] / (vol_base + 1e-9)
 
         trend_ok = close[-1] > close[-2] > close[-3]
 
+        # ★調整ポイント（軽く広げるだけ）
         breakout = (
-            price_jump > 0.03 and
-            vol_spike_1 > 2.0 and
-            vol_spike_2 > 1.5 and
-            trend_ok
-        )
+            (
+                price_jump > 0.02 and vol_spike_1 > 1.8
+            ) or (
+                price_jump > 0.015 and vol_spike_1 > 2.3
+            )
+        ) and trend_ok
 
         # =========================
         # BASE SCORE
@@ -166,7 +167,7 @@ def build_diamond(df):
     return diamond
 
 # =========================
-# BUY (v37.12 FINAL STABLE)
+# BUY (unchanged logic)
 # =========================
 def build_buy(df):
     buy = df.copy()
@@ -179,14 +180,12 @@ def build_buy(df):
         buy["breakout"] * 0.6
     )
 
-    # ★軽い構造補正（過剰イベント抑制）
     structure = (
         (buy["phase"] == "TRANSITION") * 0.9 +
         (buy["phase"] == "CONT") * 0.6 +
         (buy["phase"] == "EARLY") * 0.15
     )
 
-    # ★ここがv37.12の唯一の調整ポイント
     buy["buy_score"] = base + structure * 0.6
 
     buy = buy.sort_values("buy_score", ascending=False)
@@ -222,7 +221,7 @@ def run():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = []
-    msg.append("🚀 GrowthRadar v37.12 (FINAL STRUCTURE TUNED)")
+    msg.append("🚀 GrowthRadar v37.13 (BREAKOUT TUNED FINAL)")
     msg.append(f"Scan:{len(universe)} Valid:{len(df)}")
     msg.append(f"Time:{now}")
     msg.append("")
