@@ -1,9 +1,14 @@
-import os, requests, random, re
+import os, requests, random, re, json
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import numpy as np
+import redis
 
+# =========================
+# CONFIG
+# =========================
+REDIS_URL = os.environ.get("REDIS_URL")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
 
 SCAN_SIZE = 1500
@@ -15,20 +20,36 @@ MIN_VOL = 300000
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # =========================
-# Universe
+# REDIS INIT
+# =========================
+r = None
+REDIS_OK = False
+
+def redis_healthcheck():
+    global REDIS_OK
+    try:
+        r.ping()
+        print("🟢 Redis: CONNECTED")
+        REDIS_OK = True
+    except Exception as e:
+        print(f"🔴 Redis: FAILED ({e})")
+        REDIS_OK = False
+
+# =========================
+# UNIVERSE
 # =========================
 def load_universe():
     symbols = set()
 
     try:
         url = "https://raw.githubusercontent.com/datasets/nasdaq-listings/master/data/nasdaq-listed-symbols.csv"
-        r = requests.get(url, timeout=10)
-        lines = r.text.splitlines()[1:]
+        res = requests.get(url, timeout=10)
+        lines = res.text.splitlines()[1:]
 
         for l in lines:
-            sym = l.split(",")[0].strip().upper()
-            if re.match(r"^[A-Z]{1,6}$", sym):
-                symbols.add(sym)
+            s = l.split(",")[0].strip().upper()
+            if re.match(r"^[A-Z]{1,6}$", s):
+                symbols.add(s)
     except:
         pass
 
@@ -38,34 +59,50 @@ def load_universe():
     ]
 
     symbols.update(fallback)
-
     symbols = list(symbols)
     random.shuffle(symbols)
 
     return symbols[:SCAN_SIZE]
 
 # =========================
-# Fetch
+# REDIS STATE
+# =========================
+def get_state(ticker):
+    if not REDIS_OK:
+        return {}
+    try:
+        raw = r.get(f"gr:{ticker}:state")
+        return json.loads(raw) if raw else {}
+    except Exception as e:
+        print(f"⚠️ Redis GET error {ticker}: {e}")
+        return {}
+
+def set_state(ticker, state):
+    if not REDIS_OK:
+        return
+    try:
+        r.set(f"gr:{ticker}:state", json.dumps(state))
+    except Exception as e:
+        print(f"⚠️ Redis SET error {ticker}: {e}")
+
+# =========================
+# FETCH
 # =========================
 def fetch(session, ticker):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=6mo&interval=1d"
-        r = session.get(url, timeout=5)
-        if r.status_code != 200:
+        res = session.get(url, timeout=5)
+        if res.status_code != 200:
             return None
 
-        data = r.json()
-        result = data["chart"]["result"][0]
+        data = res.json()["chart"]["result"][0]
 
-        close = result["indicators"]["quote"][0]["close"]
-        volume = result["indicators"]["quote"][0]["volume"]
+        close = data["indicators"]["quote"][0]["close"]
+        volume = data["indicators"]["quote"][0]["volume"]
 
         close = [x for x in close if x is not None]
         volume = [x for x in volume if x is not None]
 
-        # =========================
-        # ★ 修正① データ欠損フィルタ
-        # =========================
         if len(close) < 60 or len(volume) < 60:
             return None
 
@@ -74,16 +111,11 @@ def fetch(session, ticker):
             return None
 
         vol_base = np.mean(volume[-20:-5])
-
         if np.isnan(vol_base) or vol_base <= 0:
             return None
-
         if vol_base < MIN_VOL:
             return None
 
-        # =========================
-        # ★ 修正② 疑似停止除外
-        # =========================
         if volume[-1] == 0:
             return None
 
@@ -97,19 +129,20 @@ def fetch(session, ticker):
         # =========================
         # PHASE
         # =========================
+        state = get_state(ticker)
+        prev_state = state.get("last_state", "NONE")
+
         phase = "NONE"
 
         if (0.25 < m1 < 0.7 and m3 < 0.6):
             phase = "EARLY"
-
         elif (m1 > 0.45 and m3 > 0.45):
             phase = "TRANSITION"
-
         elif (m3 > 1.0):
             phase = "CONT"
 
         # =========================
-        # ★ 修正③ BREAKOUT強化（2本確認）
+        # BREAKOUT EVENT
         # =========================
         price_jump_1 = abs(close[-1] - close[-2]) / close[-2]
         price_jump_2 = abs(close[-2] - close[-3]) / close[-3]
@@ -130,6 +163,18 @@ def fetch(session, ticker):
             vol_ratio * 0.1
         )
 
+        # =========================
+        # SAVE STATE (Redis)
+        # =========================
+        new_state = {
+            "last_price": close[-1],
+            "last_volume": volume[-1],
+            "last_state": phase,
+            "timestamp": datetime.now().isoformat()
+        }
+
+        set_state(ticker, new_state)
+
         return {
             "ticker": ticker,
             "phase": phase,
@@ -140,7 +185,8 @@ def fetch(session, ticker):
             "breakout": breakout_event
         }
 
-    except:
+    except Exception as e:
+        print(f"fetch error {ticker}: {e}")
         return None
 
 # =========================
@@ -168,7 +214,6 @@ def build_diamond(df):
             })
 
         prev = r
-
         if len(diamond) >= 5:
             break
 
@@ -178,6 +223,11 @@ def build_diamond(df):
 # RUN
 # =========================
 def run():
+    global r
+    r = redis.from_url(REDIS_URL, decode_responses=True)
+
+    redis_healthcheck()
+
     session = requests.Session()
     session.headers.update(HEADERS)
 
@@ -187,22 +237,21 @@ def run():
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(fetch, session, t): t for t in universe}
         for f in as_completed(futures):
-            r = f.result()
-            if r:
-                results.append(r)
+            res = f.result()
+            if res:
+                results.append(res)
 
     if not results:
         print("NO DATA")
         return
 
     df = pd.DataFrame(results)
-
     diamond = build_diamond(df)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v37.8 (STABLE MODEL)",
+        f"🚀 GrowthRadar v37.9 (REDIS:{'ON' if REDIS_OK else 'OFF'})",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
@@ -215,26 +264,25 @@ def run():
         for _, r in diamond.iterrows():
             msg.append(f"**{r.ticker}** S:{r.score:.2f} GAP:{r.gap:.2f}")
 
-    early = df[df.phase=="EARLY"].sort_values("score", ascending=False).head(4)
+    early = df[df.phase=="EARLY"].head(4)
     msg.append("\n🔥 EARLY")
-    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in early.iterrows()] or ["None"]
+    msg += [f"{r.ticker}" for _, r in early.iterrows()] or ["None"]
 
-    trans = df[df.phase=="TRANSITION"].sort_values("score", ascending=False).head(4)
+    trans = df[df.phase=="TRANSITION"].head(4)
     msg.append("\n⚡ TRANSITION")
-    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in trans.iterrows()] or ["None"]
+    msg += [f"{r.ticker}" for _, r in trans.iterrows()] or ["None"]
 
-    cont = df[df.phase=="CONT"].sort_values("score", ascending=False).head(4)
+    cont = df[df.phase=="CONT"].head(4)
     msg.append("\n🔁 CONT")
-    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in cont.iterrows()] or ["None"]
+    msg += [f"{r.ticker}" for _, r in cont.iterrows()] or ["None"]
 
     brk = df[df.breakout].head(4)
     msg.append("\n🧨 BREAKOUT (event)")
     msg += [f"{r.ticker}" for _, r in brk.iterrows()] or ["None"]
 
-    msg.append("")  # ← 空行保証
+    msg.append("")
 
     text = "\n".join(msg)
-
     print(text)
 
     if WEBHOOK_URL:
