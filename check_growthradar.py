@@ -54,27 +54,37 @@ def fetch(session, ticker):
         if r.status_code != 200:
             return None
 
-        data = r.json()["chart"]["result"][0]
+        data = r.json()
+        result = data["chart"]["result"][0]
 
-        close = data["indicators"]["quote"][0]["close"]
-        volume = data["indicators"]["quote"][0]["volume"]
+        close = result["indicators"]["quote"][0]["close"]
+        volume = result["indicators"]["quote"][0]["volume"]
 
         close = [x for x in close if x is not None]
         volume = [x for x in volume if x is not None]
 
-        if len(close) < 60:
+        # =========================
+        # ★ 修正① データ欠損フィルタ
+        # =========================
+        if len(close) < 60 or len(volume) < 60:
             return None
 
         price = close[-1]
         if price < MIN_PRICE:
             return None
 
-        # safety fix（ここ重要）
-        if len(volume[-20:-5]) == 0:
+        vol_base = np.mean(volume[-20:-5])
+
+        if np.isnan(vol_base) or vol_base <= 0:
             return None
 
-        vol_base = np.mean(volume[-20:-5])
         if vol_base < MIN_VOL:
+            return None
+
+        # =========================
+        # ★ 修正② 疑似停止除外
+        # =========================
+        if volume[-1] == 0:
             return None
 
         def ret(a,b): return (a/b - 1) if b else 0
@@ -85,7 +95,7 @@ def fetch(session, ticker):
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
         # =========================
-        # PHASES
+        # PHASE
         # =========================
         phase = "NONE"
 
@@ -99,11 +109,19 @@ def fetch(session, ticker):
             phase = "CONT"
 
         # =========================
-        # BREAKOUT (event only)
+        # ★ 修正③ BREAKOUT強化（2本確認）
         # =========================
+        price_jump_1 = abs(close[-1] - close[-2]) / close[-2]
+        price_jump_2 = abs(close[-2] - close[-3]) / close[-3]
+
+        vol_spike_1 = volume[-1] / (vol_base + 1e-9)
+        vol_spike_2 = volume[-2] / (vol_base + 1e-9)
+
         breakout_event = (
-            vol_ratio > 2.0 and
-            abs(close[-1] - close[-2]) / close[-2] > 0.03
+            price_jump_1 > 0.03 and
+            price_jump_2 > 0.02 and
+            vol_spike_1 > 2.0 and
+            vol_spike_2 > 1.5
         )
 
         score = (
@@ -184,7 +202,7 @@ def run():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = [
-        "🚀 GrowthRadar v37.7 (STABLE MODEL)",
+        "🚀 GrowthRadar v37.8 (STABLE MODEL)",
         f"Scan:{len(universe)} Valid:{len(df)}",
         f"Time:{now}",
         "",
@@ -213,7 +231,7 @@ def run():
     msg.append("\n🧨 BREAKOUT (event)")
     msg += [f"{r.ticker}" for _, r in brk.iterrows()] or ["None"]
 
-    msg.append("")  # 最終空行
+    msg.append("")  # ← 空行保証
 
     text = "\n".join(msg)
 
