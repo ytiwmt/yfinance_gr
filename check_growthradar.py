@@ -98,7 +98,7 @@ def fetch(session, ticker):
             phase = "CONT"
 
         # =========================
-        # BREAKOUT (stable)
+        # BREAKOUT
         # =========================
         price_jump = abs(close[-1] - close[-2]) / close[-2]
         vol_spike_1 = volume[-1] / (vol_base + 1e-9)
@@ -163,7 +163,7 @@ def build_diamond(df):
     return diamond
 
 # =========================
-# BUY (v37.14 FINAL FIX)
+# BUY SCORE (v37.15 FIXED NORMALIZATION)
 # =========================
 def build_buy(df):
     buy = df.copy()
@@ -176,27 +176,31 @@ def build_buy(df):
         buy["breakout"] * 0.4
     )
 
-    # =========================
-    # STRUCTURE SCORE
-    # =========================
     structure = (
         (buy["phase"] == "TRANSITION") * 0.9 +
         (buy["phase"] == "CONT") * 0.6 +
         (buy["phase"] == "EARLY") * 0.15
     )
 
-    # =========================
-    # ★ v37.14 핵심修正：飽和制御
-    # =========================
     structure = np.minimum(structure, 1.1)
 
-    # ★重複過多銘柄の暴走抑制
     redundancy_penalty = (
         (buy["phase"] == "TRANSITION") &
         (buy["breakout"])
     ) * 0.2
 
-    buy["buy_score"] = base + structure * 0.6 - redundancy_penalty
+    raw_score = base + structure * 0.6 - redundancy_penalty
+
+    # =========================
+    # ★ v37.15 CORE FIX
+    # =========================
+    # ① soft normalization (dominance suppression)
+    normalized = 8.0 * (1 - np.exp(-raw_score / 8.0))
+
+    # ② z-like stabilization (cross-ticker balance)
+    normalized = (normalized - normalized.mean()) / (normalized.std() + 1e-9) + 5.0
+
+    buy["buy_score"] = normalized
 
     buy = buy.sort_values("buy_score", ascending=False)
 
@@ -231,7 +235,7 @@ def run():
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     msg = []
-    msg.append("🚀 GrowthRadar v37.14 (FINAL SATURATION CONTROL)")
+    msg.append("🚀 GrowthRadar v37.15 (FINAL NORMALIZATION FIX)")
     msg.append(f"Scan:{len(universe)} Valid:{len(df)}")
     msg.append(f"Time:{now}")
     msg.append("")
