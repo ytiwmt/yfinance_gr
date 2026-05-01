@@ -144,20 +144,25 @@ def fetch(session, ticker):
         if vol_accel > 1.5:
             vol_change += min((vol_accel - 1.5)*0.2, 0.6)
 
-        # ===== COMPRESSION（38.3追加）=====
-        range_5 = max(close[-5:]) - min(close[-5:])
-        range_20 = max(close[-20:]) - min(close[-20:])
-        compression_ratio = range_5 / (range_20 + 1e-9)
+        # ===== LIQUIDITY =====
+        liquidity = min(1.0, vol_base / 1_000_000)
 
+        # ===== COMPRESSION（修正版）=====
         compression_score = 0
-        if compression_ratio < 0.35:
-            compression_score = 0.5
-        elif compression_ratio < 0.5:
-            compression_score = 0.25
+
+        if liquidity > 0.6:
+            range_5 = max(close[-5:]) - min(close[-5:])
+            range_20 = max(close[-20:]) - min(close[-20:])
+            compression_ratio = range_5 / (range_20 + 1e-9)
+
+            if compression_ratio < 0.35:
+                compression_score = 0.5
+            elif compression_ratio < 0.5:
+                compression_score = 0.25
 
         # ===== TOTAL CHANGE =====
         change = price_change + vol_change + compression_score
-        change = min(change, 1.5)
+        change = min(change, 1.8)
 
         # ===== PHASE BOOST =====
         phase_boost = 1.0
@@ -170,11 +175,11 @@ def fetch(session, ticker):
         elif phase == "CONT":
             phase_boost = 0.95
 
-        # ===== LIQUIDITY =====
-        liquidity = min(1.0, vol_base / 1_000_000)
+        # ===== CONT BOOST（38.4追加）=====
+        cont_boost = 1.15 if phase == "CONT" else 1.0
 
         # ===== FINAL =====
-        final = state * (1 + change) * phase_boost * liquidity
+        final = state * (1 + change) * phase_boost * liquidity * cont_boost
 
         return {
             "ticker": ticker,
@@ -192,7 +197,7 @@ def fetch(session, ticker):
 def build_msg(df):
     msg = []
 
-    msg.append("🚀 GrowthRadar v38.3 (STATE × CHANGE × VOLUME × COMPRESSION)")
+    msg.append("🚀 GrowthRadar v38.4 (NEAR FINAL)")
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append(f"🟢 Redis: {'ON' if r else 'OFF'}")
