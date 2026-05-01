@@ -63,6 +63,7 @@ def fetch(session, ticker):
             return None
 
         data = res.json()["chart"]["result"][0]
+
         close = [x for x in data["indicators"]["quote"][0]["close"] if x]
         volume = [x for x in data["indicators"]["quote"][0]["volume"] if x]
 
@@ -131,10 +132,9 @@ def fetch(session, ticker):
         valid_delta = delta1 > 0.05
         up = max(delta1, 0) if valid_delta else 0
         accel = max(delta1 - delta2, 0) if valid_delta else 0
-
         price_change = up*0.6 + accel*0.8
 
-        # ===== VOLUME CHANGE（38.2追加）=====
+        # ===== VOLUME =====
         vol_trend = volume[-1] > volume[-2] > volume[-3]
         vol_accel = volume[-1] / (volume[-3] + 1e-9)
 
@@ -142,10 +142,21 @@ def fetch(session, ticker):
         if vol_trend:
             vol_change += 0.3
         if vol_accel > 1.5:
-            vol_change += min((vol_accel - 1.5) * 0.2, 0.6)
+            vol_change += min((vol_accel - 1.5)*0.2, 0.6)
+
+        # ===== COMPRESSION（38.3追加）=====
+        range_5 = max(close[-5:]) - min(close[-5:])
+        range_20 = max(close[-20:]) - min(close[-20:])
+        compression_ratio = range_5 / (range_20 + 1e-9)
+
+        compression_score = 0
+        if compression_ratio < 0.35:
+            compression_score = 0.5
+        elif compression_ratio < 0.5:
+            compression_score = 0.25
 
         # ===== TOTAL CHANGE =====
-        change = price_change + vol_change
+        change = price_change + vol_change + compression_score
         change = min(change, 1.5)
 
         # ===== PHASE BOOST =====
@@ -181,7 +192,7 @@ def fetch(session, ticker):
 def build_msg(df):
     msg = []
 
-    msg.append(f"🚀 GrowthRadar v38.2 (STATE × CHANGE × VOLUME)")
+    msg.append("🚀 GrowthRadar v38.3 (STATE × CHANGE × VOLUME × COMPRESSION)")
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append(f"🟢 Redis: {'ON' if r else 'OFF'}")
