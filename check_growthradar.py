@@ -17,7 +17,7 @@ MIN_VOL = 300000
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # =========================
-# REDIS
+# REDIS INIT
 # =========================
 r = None
 if REDIS_URL:
@@ -110,7 +110,6 @@ def fetch(session, ticker):
         # =========================
         price_jump = abs(close[-1] - close[-2]) / close[-2]
         vol_spike = volume[-1] / (vol_base + 1e-9)
-
         trend_ok = close[-1] > close[-2] > close[-3]
 
         breakout = (
@@ -119,32 +118,50 @@ def fetch(session, ticker):
         ) and trend_ok
 
         # =========================
-        # SCORE BASE
+        # BASE SCORE
         # =========================
-        raw_score = (
+        base_score = (
             m1 * 0.6 +
             m3 * 0.3 +
             vol_ratio * 0.1 +
             breakout * 0.4
         )
 
-        score = 8.5 * (1 - np.exp(-raw_score / 8.5))
-
         # =========================
-        # REDIS DELTA (③)
+        # REDIS FEATURES
         # =========================
         delta = 0.0
+        phase_weight = 1.0
+
         if r:
+            # ---- delta（加速）
             prev = r.get(f"score:{ticker}")
             if prev is not None:
-                delta = score - float(prev)
+                delta = float(base_score) - float(prev)
 
-            r.set(f"score:{ticker}", score, ex=3600)
+            r.set(f"score:{ticker}", base_score, ex=3600)
 
-            # =========================
-            # PHASE MEMORY (②)
-            # =========================
+            # ---- phase memory
+            prev_phase = r.get(f"phase:{ticker}")
             r.set(f"phase:{ticker}", phase, ex=86400)
+
+            # =========================
+            # PHASE WEIGHTING
+            # =========================
+            if phase == "EARLY":
+                phase_weight = 1.05
+            elif phase == "TRANSITION":
+                phase_weight = 1.15
+            elif phase == "CONT":
+                phase_weight = 0.95
+
+        # =========================
+        # FINAL SCORE (核心変更)
+        # =========================
+        score = (
+            base_score
+            + max(delta, 0) * 0.8
+        ) * phase_weight
 
         return {
             "ticker": ticker,
@@ -159,6 +176,24 @@ def fetch(session, ticker):
 
     except:
         return None
+
+# =========================
+# BUY
+# =========================
+def build_buy(df):
+    d = df.copy()
+
+    structure = (
+        (d["phase"] == "TRANSITION") * 0.9 +
+        (d["phase"] == "CONT") * 0.6 +
+        (d["phase"] == "EARLY") * 0.15
+    )
+
+    structure = np.minimum(structure, 1.1)
+
+    d["buy_score"] = d["score"] + structure * 0.5
+
+    return d.sort_values("buy_score", ascending=False).head(5).to_dict("records")
 
 # =========================
 # DIAMOND
@@ -190,33 +225,6 @@ def build_diamond(df):
     return out
 
 # =========================
-# BUY (delta integrated)
-# =========================
-def build_buy(df):
-    d = df.copy()
-
-    structure = (
-        (d["phase"] == "TRANSITION") * 0.9 +
-        (d["phase"] == "CONT") * 0.6 +
-        (d["phase"] == "EARLY") * 0.15
-    )
-
-    structure = np.minimum(structure, 1.1)
-
-    # ★ ③ deltaをここで活用
-    momentum_bonus = np.clip(d["delta"], 0, 2.0)
-
-    score = (
-        d["score"] +
-        structure * 0.6 +
-        momentum_bonus * 0.8
-    )
-
-    d["buy_score"] = score
-
-    return d.sort_values("buy_score", ascending=False).head(5).to_dict("records")
-
-# =========================
 # RUN
 # =========================
 def run():
@@ -244,7 +252,7 @@ def run():
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    print(f"🚀 GrowthRadar v37.17 (REDIS DELTA MODEL)")
+    print(f"🚀 GrowthRadar v37.18 (REDIS ANALYTICS MODEL)")
     print(f"Scan:{len(universe)} Valid:{len(df)}")
     print(f"Time:{now}\n")
 
