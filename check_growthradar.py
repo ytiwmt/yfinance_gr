@@ -163,7 +163,7 @@ def fetch(session, ticker):
         # =========================
         score = (base_score + max(delta, 0) * 0.8) * phase_weight
 
-        # DEBUG LOG（ローカルのみ）
+        # DEBUG（ローカルのみ）
         print(f"[REDIS] {ticker} score={score:.2f} delta={delta:.2f} phase={phase}")
 
         return {
@@ -177,23 +177,26 @@ def fetch(session, ticker):
         return None
 
 # =========================
-# BUY SIGNAL
+# DISCORD
 # =========================
-def build_buy(df):
-    d = df.copy()
+def send_discord(df):
+    if not WEBHOOK_URL:
+        return
 
-    structure = (
-        (d["phase"] == "TRANSITION") * 0.9 +
-        (d["phase"] == "CONT") * 0.6 +
-        (d["phase"] == "EARLY") * 0.15
-    )
+    msg = "🚀 GrowthRadar\n\n💎 BUY SIGNAL\n"
 
-    d["buy_score"] = d["score"] + structure * 0.5
+    buy = df.sort_values("score", ascending=False).head(5)
 
-    return d.sort_values("buy_score", ascending=False).head(5).to_dict("records")
+    for _, r in buy.iterrows():
+        msg += f"**{r.ticker}** S:{r.score:.2f}\n"
+
+    if len(msg) > 1900:
+        msg = msg[:1900] + "\n...(cut)"
+
+    requests.post(WEBHOOK_URL, json={"content": msg})
 
 # =========================
-# OUTPUT (FIXED FORMAT)
+# OUTPUT（固定フォーマット）
 # =========================
 def print_output(redis_connected, df):
     print(f"🟢 Redis: {'CONNECTED' if redis_connected else 'OFF'}")
@@ -241,9 +244,10 @@ def run():
 
     df = pd.DataFrame(results)
 
-    buy = build_buy(df)
-
     print_output(r is not None, df)
+
+    # ★ Discord通知（BUYのみ）
+    send_discord(df)
 
 if __name__ == "__main__":
     run()
