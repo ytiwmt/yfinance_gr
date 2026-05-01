@@ -180,12 +180,19 @@ def fetch(session, ticker):
 
         base_score = state_factor * (1 + effective_change) * phase_boost
 
-        # ===== STREAK BOOST
-        streak_boost = 1 + min(streak * 0.08, 0.6)
+        # =========================
+        # ★ 38.1の最小修正（ここだけ）
+        # =========================
 
-        # ===== スパイク完全抑制
+        # ① streak未成熟救済
+        if streak == 0:
+            streak_boost = 0.85
+        else:
+            streak_boost = 1 + min(streak * 0.08, 0.6)
+
+        # ② スパイク抑制（緩和版）
         if streak <= 1 and delta1 > 1.0:
-            streak_boost *= 0.5
+            streak_boost *= 0.7
 
         score = base_score * streak_boost
 
@@ -202,7 +209,7 @@ def fetch(session, ticker):
         return None
 
 # =========================
-# THEME強制
+# THEME CONTROL（緩和）
 # =========================
 def apply_theme_control(df):
     if len(df) == 0:
@@ -220,19 +227,20 @@ def apply_theme_control(df):
         df["final_score"] = df["score"]
         return df
 
-    top_themes = theme_strength.sort_values(ascending=False).head(2).index
+    # ★ ③ テーマ数を緩和（2→3）
+    top_themes = theme_strength.sort_values(ascending=False).head(3).index
 
     def adjust(row):
         t = row["theme"]
 
         if t == "leveraged":
-            return row["score"] * 0.5  # ETF減点
+            return row["score"] * 0.5
 
         if t not in top_themes and t != "other":
-            return row["score"] * 0.7  # テーマ外減点
+            return row["score"] * 0.7
 
         if t in top_themes:
-            return row["score"] * 1.25  # テーマ強制
+            return row["score"] * 1.25
 
         return row["score"]
 
@@ -255,7 +263,7 @@ def build_buy(df):
             continue
 
         if t == "leveraged":
-            continue  # 完全除外
+            continue
 
         result.append(row)
         theme_used[t] = theme_used.get(t, 0) + 1
@@ -270,7 +278,7 @@ def build_buy(df):
 # =========================
 def build_msg(df, buy):
     msg = []
-    msg.append("🚀 GrowthRadar v39.0 (TRADE MODEL)")
+    msg.append("🚀 GrowthRadar v39.1 (WARMUP SAFE)")
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append(f"🟢 Redis: {'ON' if r else 'OFF'}")
@@ -279,13 +287,13 @@ def build_msg(df, buy):
     msg += [f"{x.ticker} S:{x.final_score:.2f} Streak:{x.streak}" for x in buy] or ["None"]
 
     msg.append("\n🔥 EARLY")
-    msg += [f"{r.ticker} S:{r.final_score:.2f}" for _, r in df[df.phase=="EARLY"].head(4).iterrows()] or ["None"]
+    msg += [f"{r.ticker} S:{r.final_score:.2f}" for _, r in df[df.phase=='EARLY'].head(4).iterrows()] or ["None"]
 
     msg.append("\n⚡ TRANSITION")
-    msg += [f"{r.ticker} S:{r.final_score:.2f}" for _, r in df[df.phase=="TRANSITION"].head(4).iterrows()] or ["None"]
+    msg += [f"{r.ticker} S:{r.final_score:.2f}" for _, r in df[df.phase=='TRANSITION'].head(4).iterrows()] or ["None"]
 
     msg.append("\n🔁 CONT")
-    msg += [f"{r.ticker} S:{r.final_score:.2f}" for _, r in df[df.phase=="CONT"].head(4).iterrows()] or ["None"]
+    msg += [f"{r.ticker} S:{r.final_score:.2f}" for _, r in df[df.phase=='CONT'].head(4).iterrows()] or ["None"]
 
     msg.append("\n🧨 BREAKOUT (event)")
     msg += [r.ticker for _, r in df[df.breakout].head(4).iterrows()] or ["None"]
