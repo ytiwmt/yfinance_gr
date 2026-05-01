@@ -32,26 +32,6 @@ else:
     print("⚠️ Redis: NOT SET")
 
 # =========================
-# DEBUG MODE
-# =========================
-DEBUG = True
-
-def redis_debug_log(ticker, score, delta, phase):
-    if not r or not DEBUG:
-        return
-
-    prev_score = r.get(f"score:{ticker}")
-    prev_phase = r.get(f"phase:{ticker}")
-
-    print(f"[REDIS DEBUG] {ticker}")
-    print(f"  prev_score={prev_score}")
-    print(f"  current_score={score:.4f}")
-    print(f"  delta={delta:.4f}")
-    print(f"  prev_phase={prev_phase}")
-    print(f"  new_phase={phase}")
-    print("")
-
-# =========================
 # UNIVERSE
 # =========================
 def load_universe():
@@ -110,6 +90,7 @@ def fetch(session, ticker):
 
         m1 = ret(close[-1], close[-21])
         m3 = ret(close[-1], close[-63])
+
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
         # =========================
@@ -137,7 +118,7 @@ def fetch(session, ticker):
         ) and trend_ok
 
         # =========================
-        # BASE SCORE
+        # SCORE
         # =========================
         base_score = (
             m1 * 0.6 +
@@ -146,28 +127,18 @@ def fetch(session, ticker):
             breakout * 0.4
         )
 
-        # =========================
-        # REDIS STATE LOAD
-        # =========================
         delta = 0.0
         phase_weight = 1.0
 
-        prev_score = None
-        prev_phase = None
-
         if r:
-            prev_score = r.get(f"score:{ticker}")
-            prev_phase = r.get(f"phase:{ticker}")
-
-            if prev_score is not None:
-                delta = base_score - float(prev_score)
+            prev = r.get(f"score:{ticker}")
+            if prev is not None:
+                delta = base_score - float(prev)
 
             r.set(f"score:{ticker}", base_score, ex=3600)
             r.set(f"phase:{ticker}", phase, ex=86400)
 
-        # =========================
-        # PHASE WEIGHT
-        # =========================
+        # phase weight（ロジック維持）
         if phase == "EARLY":
             phase_weight = 1.05
         elif phase == "TRANSITION":
@@ -175,24 +146,18 @@ def fetch(session, ticker):
         elif phase == "CONT":
             phase_weight = 0.95
 
-        # =========================
-        # FINAL SCORE
-        # =========================
         score = (base_score + max(delta, 0) * 0.8) * phase_weight
 
         # =========================
-        # DEBUG OUTPUT (核心追加)
+        # DEBUG LOG（ローカルのみ）
         # =========================
-        redis_debug_log(ticker, score, delta, phase)
+        print(f"[REDIS] {ticker} score={score:.2f} delta={delta:.2f} phase={phase}")
 
         return {
             "ticker": ticker,
             "phase": phase,
             "score": float(score),
             "delta": float(delta),
-            "base": float(base_score),
-            "prev_score": float(prev_score) if prev_score else None,
-            "prev_phase": prev_phase,
             "breakout": bool(breakout)
         }
 
@@ -214,6 +179,23 @@ def build_buy(df):
     d["buy_score"] = d["score"] + structure * 0.5
 
     return d.sort_values("buy_score", ascending=False).head(5).to_dict("records")
+
+# =========================
+# DISCORD
+# =========================
+def send_discord(df):
+    if not WEBHOOK_URL:
+        return
+
+    msg = "🚀 GrowthRadar\n\n💎 BUY SIGNAL\n"
+
+    for _, r in df.iterrows():
+        msg += f"**{r.ticker}** S:{r.score:.2f}\n"
+
+    if len(msg) > 1900:
+        msg = msg[:1900] + "\n...(cut)"
+
+    requests.post(WEBHOOK_URL, json={"content": msg})
 
 # =========================
 # RUN
@@ -238,7 +220,7 @@ def run():
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    print(f"\n🚀 GrowthRadar v37.19 (DEBUG MODE)")
+    print(f"\n🚀 GrowthRadar v37.20 (STABLE OPS)")
     print(f"Scan:{len(universe)} Valid:{len(df)}")
     print(f"Time:{now}\n")
 
@@ -246,9 +228,8 @@ def run():
     for b in buy:
         print(f"{b['ticker']} S:{b['buy_score']:.2f}")
 
-    print("\n🧪 DEBUG SUMMARY")
-    print("Redis tracking enabled:", r is not None)
-    print("Symbols with delta tracking:", len(df))
+    # ★ Discordは“結果のみ”
+    send_discord(df.sort_values("score", ascending=False).head(5))
 
 if __name__ == "__main__":
     run()
