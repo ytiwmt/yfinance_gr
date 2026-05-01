@@ -31,6 +31,22 @@ if REDIS_URL:
         r = None
 
 # =========================
+# SECTOR MAP（簡易版）
+# =========================
+SECTOR_MAP = {
+    "semiconductor": ["NVDA","AMD","QCOM","AVGO","TSM","MU","ASML","COHU","AMKR","DIOD","LSCC"],
+    "ai": ["PLTR","SNOW","AI","BBAI"],
+    "biotech": ["MRNA","NVAX","BNTX","REGN","VRTX","ALNY"],
+    "energy": ["XOM","CVX","SLB","HAL"],
+}
+
+def get_sector(ticker):
+    for k, v in SECTOR_MAP.items():
+        if ticker in v:
+            return k
+    return "other"
+
+# =========================
 # UNIVERSE
 # =========================
 def load_universe():
@@ -84,7 +100,7 @@ def fetch(session, ticker):
         m3 = ret(close[-1], close[-63])
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
-        # ===== PHASE =====
+        # PHASE
         phase = "NONE"
         if (0.25 < m1 < 0.7 and m3 < 0.6):
             phase = "EARLY"
@@ -93,7 +109,7 @@ def fetch(session, ticker):
         elif (m3 > 1.0):
             phase = "CONT"
 
-        # ===== BREAKOUT =====
+        # BREAKOUT
         price_jump = abs(close[-1] - close[-2]) / close[-2]
         trend_ok = close[-1] > close[-2] > close[-3]
 
@@ -102,11 +118,11 @@ def fetch(session, ticker):
             (price_jump > 0.015 and vol_ratio > 2.3)
         ) and trend_ok
 
-        # ===== STATE =====
+        # STATE
         raw = m1*0.6 + m3*0.3 + vol_ratio*0.1 + breakout*0.4
         state = 8.5 * (1 - np.exp(-raw / 8.5))
 
-        # ===== REDIS =====
+        # REDIS
         delta1 = 0
         delta2 = 0
         prev_phase = None
@@ -128,48 +144,21 @@ def fetch(session, ticker):
             r.set(f"s:{ticker}", state, ex=7200)
             r.set(f"p:{ticker}", phase, ex=86400)
 
-        # ===== PRICE CHANGE =====
-        valid_delta = delta1 > 0.05
-        up = max(delta1, 0) if valid_delta else 0
-        accel = max(delta1 - delta2, 0) if valid_delta else 0
+        # CHANGE
+        up = max(delta1, 0)
+        accel = max(delta1 - delta2, 0)
         price_change = up*0.6 + accel*0.8
 
-        # ===== VOLUME CHANGE =====
         vol_trend = volume[-1] > volume[-2] > volume[-3]
-        vol_accel = volume[-1] / (volume[-3] + 1e-9)
+        vol_change = 0.25 if vol_trend else 0
 
-        vol_change = 0
-        if vol_trend:
-            vol_change += 0.25
-        if vol_accel > 1.5:
-            vol_change += min((vol_accel - 1.5)*0.2, 0.5)
-
-        # ===== LIQUIDITY =====
-        liquidity = min(1.0, vol_base / 1_000_000)
-
-        # ===== COMPRESSION =====
-        compression_score = 0
-        if liquidity > 0.6:
-            range_5 = max(close[-5:]) - min(close[-5:])
-            range_20 = max(close[-20:]) - min(close[-20:])
-            compression_ratio = range_5 / (range_20 + 1e-9)
-
-            if compression_ratio < 0.35:
-                compression_score = 0.4
-            elif compression_ratio < 0.5:
-                compression_score = 0.2
-
-        # ===== CHANGE =====
-        change = price_change + vol_change + compression_score
-        change = min(change, 1.6)
-
-        # ★ STATE依存（暴走防止）
+        change = min(price_change + vol_change, 1.5)
         effective_change = change * (0.3 + state * 0.4)
 
-        # ===== STATE FACTOR（フィルター廃止）=====
+        # STATE FACTOR
         state_factor = 0.4 + state * 0.6
 
-        # ===== PHASE BOOST =====
+        # PHASE BOOST
         phase_boost = 1.0
         if prev_phase == "EARLY" and phase == "TRANSITION":
             phase_boost = 1.2
@@ -180,42 +169,83 @@ def fetch(session, ticker):
         elif phase == "CONT":
             phase_boost = 1.05
 
-        # ===== FINAL =====
-        final = state_factor * (1 + effective_change) * phase_boost * liquidity
+        base_score = state_factor * (1 + effective_change) * phase_boost
 
         return {
             "ticker": ticker,
             "phase": phase,
-            "score": float(final),
-            "breakout": breakout
+            "score": float(base_score),
+            "breakout": breakout,
+            "sector": get_sector(ticker)
         }
 
     except:
         return None
 
 # =========================
+# SECTOR BOOST
+# =========================
+def apply_sector_boost(df):
+    sector_counts = df["sector"].value_counts()
+
+    df["sector_strength"] = df["sector"].map(sector_counts)
+
+    # 正規化（max基準）
+    max_count = sector_counts.max()
+    df["sector_norm"] = df["sector_strength"] / max_count
+
+    # ★ 軽いブースト（重要）
+    df["final_score"] = df["score"] * (1 + df["sector_norm"] * 0.25)
+
+    return df
+
+# =========================
+# BUY（セクター制限あり）
+# =========================
+def build_buy(df):
+    df = df.sort_values("final_score", ascending=False)
+
+    result = []
+    sector_used = {}
+
+    for _, r0 in df.iterrows():
+        sec = r0["sector"]
+
+        # 同一セクター最大2
+        if sector_used.get(sec, 0) >= 2:
+            continue
+
+        result.append(r0)
+        sector_used[sec] = sector_used.get(sec, 0) + 1
+
+        if len(result) >= 5:
+            break
+
+    return result
+
+# =========================
 # DISCORD
 # =========================
-def build_msg(df):
+def build_msg(df, buy):
     msg = []
 
-    msg.append("🚀 GrowthRadar v38.6 (WEIGHTED CONTROL MODEL)")
+    msg.append("🚀 GrowthRadar v38.7 (SECTOR FLOW MODEL)")
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append(f"🟢 Redis: {'ON' if r else 'OFF'}")
 
     msg.append("\n💎 BUY SIGNAL")
-    for _, r0 in df.sort_values("score", ascending=False).head(5).iterrows():
-        msg.append(f"{r0.ticker} S:{r0.score:.2f}")
+    for r0 in buy:
+        msg.append(f"{r0.ticker} S:{r0.final_score:.2f}")
 
     msg.append("\n🔥 EARLY")
-    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in df[df.phase=="EARLY"].head(4).iterrows()] or ["None"]
+    msg += [f"{r.ticker} S:{r.final_score:.2f}" for _, r in df[df.phase=="EARLY"].head(4).iterrows()] or ["None"]
 
     msg.append("\n⚡ TRANSITION")
-    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in df[df.phase=="TRANSITION"].head(4).iterrows()] or ["None"]
+    msg += [f"{r.ticker} S:{r.final_score:.2f}" for _, r in df[df.phase=="TRANSITION"].head(4).iterrows()] or ["None"]
 
     msg.append("\n🔁 CONT")
-    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in df[df.phase=="CONT"].head(4).iterrows()] or ["None"]
+    msg += [f"{r.ticker} S:{r.final_score:.2f}" for _, r in df[df.phase=="CONT"].head(4).iterrows()] or ["None"]
 
     msg.append("\n🧨 BREAKOUT (event)")
     msg += [r.ticker for _, r in df[df.breakout].head(4).iterrows()] or ["None"]
@@ -241,7 +271,10 @@ def run():
 
     df = pd.DataFrame(results)
 
-    text = build_msg(df)
+    df = apply_sector_boost(df)
+    buy = build_buy(df)
+
+    text = build_msg(df, buy)
     print(text)
 
     if WEBHOOK_URL:
