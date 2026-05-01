@@ -3,8 +3,10 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import numpy as np
+import redis
 
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
+REDIS_URL = os.environ.get("REDIS_URL")
 
 SCAN_SIZE = 1500
 MAX_WORKERS = 12
@@ -15,6 +17,21 @@ MIN_VOL = 300000
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # =========================
+# REDIS
+# =========================
+r = None
+if REDIS_URL:
+    try:
+        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        r.ping()
+        print("🟢 Redis: CONNECTED")
+    except:
+        print("🔴 Redis: FAILED")
+        r = None
+else:
+    print("⚠️ Redis: NOT SET")
+
+# =========================
 # UNIVERSE
 # =========================
 def load_universe():
@@ -22,10 +39,9 @@ def load_universe():
 
     try:
         url = "https://raw.githubusercontent.com/datasets/nasdaq-listings/master/data/nasdaq-listed-symbols.csv"
-        r = requests.get(url, timeout=10)
-        lines = r.text.splitlines()[1:]
+        data = requests.get(url, timeout=10).text.splitlines()[1:]
 
-        for l in lines:
+        for l in data:
             s = l.split(",")[0].strip().upper()
             if re.match(r"^[A-Z]{1,6}$", s):
                 symbols.add(s)
@@ -38,7 +54,6 @@ def load_universe():
     ]
 
     symbols.update(fallback)
-
     symbols = list(symbols)
     random.shuffle(symbols)
 
@@ -50,19 +65,17 @@ def load_universe():
 def fetch(session, ticker):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=6mo&interval=1d"
-        r = session.get(url, timeout=5)
-        if r.status_code != 200:
+        res = session.get(url, timeout=5)
+
+        if res.status_code != 200:
             return None
 
-        data = r.json()["chart"]["result"][0]
+        data = res.json()["chart"]["result"][0]
 
-        close = data["indicators"]["quote"][0]["close"]
-        volume = data["indicators"]["quote"][0]["volume"]
+        close = [x for x in data["indicators"]["quote"][0]["close"] if x is not None]
+        volume = [x for x in data["indicators"]["quote"][0]["volume"] if x is not None]
 
-        close = [x for x in close if x is not None]
-        volume = [x for x in volume if x is not None]
-
-        if len(close) < 60 or len(volume) < 60:
+        if len(close) < 60:
             return None
 
         price = close[-1]
@@ -70,9 +83,6 @@ def fetch(session, ticker):
             return None
 
         vol_base = np.mean(volume[-20:-5])
-
-        if np.isnan(vol_base) or vol_base <= 0:
-            return None
         if vol_base < MIN_VOL:
             return None
 
@@ -84,16 +94,14 @@ def fetch(session, ticker):
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
         # =========================
-        # PHASES
+        # PHASE
         # =========================
         phase = "NONE"
 
         if (0.25 < m1 < 0.7 and m3 < 0.6):
             phase = "EARLY"
-
         elif (m1 > 0.45 and m3 > 0.45):
             phase = "TRANSITION"
-
         elif (m3 > 1.0):
             phase = "CONT"
 
@@ -101,17 +109,17 @@ def fetch(session, ticker):
         # BREAKOUT
         # =========================
         price_jump = abs(close[-1] - close[-2]) / close[-2]
-        vol_spike_1 = volume[-1] / (vol_base + 1e-9)
+        vol_spike = volume[-1] / (vol_base + 1e-9)
 
         trend_ok = close[-1] > close[-2] > close[-3]
 
         breakout = (
-            (price_jump > 0.02 and vol_spike_1 > 1.8) or
-            (price_jump > 0.015 and vol_spike_1 > 2.3)
+            (price_jump > 0.02 and vol_spike > 1.8) or
+            (price_jump > 0.015 and vol_spike > 2.3)
         ) and trend_ok
 
         # =========================
-        # BASE SCORE
+        # SCORE BASE
         # =========================
         raw_score = (
             m1 * 0.6 +
@@ -120,16 +128,29 @@ def fetch(session, ticker):
             breakout * 0.4
         )
 
-        # =========================
-        # FINAL STABLE NORMALIZATION (v37.16)
-        # =========================
-        # ★ここが唯一の安定化ロジック
         score = 8.5 * (1 - np.exp(-raw_score / 8.5))
+
+        # =========================
+        # REDIS DELTA (③)
+        # =========================
+        delta = 0.0
+        if r:
+            prev = r.get(f"score:{ticker}")
+            if prev is not None:
+                delta = score - float(prev)
+
+            r.set(f"score:{ticker}", score, ex=3600)
+
+            # =========================
+            # PHASE MEMORY (②)
+            # =========================
+            r.set(f"phase:{ticker}", phase, ex=86400)
 
         return {
             "ticker": ticker,
             "phase": phase,
             "score": float(score),
+            "delta": float(delta),
             "m1": float(m1),
             "m3": float(m3),
             "vol_ratio": float(vol_ratio),
@@ -143,62 +164,57 @@ def fetch(session, ticker):
 # DIAMOND
 # =========================
 def build_diamond(df):
-    trans = df[df.phase == "TRANSITION"].copy()
-
-    if len(trans) == 0:
+    t = df[df.phase == "TRANSITION"].copy()
+    if len(t) == 0:
         return []
 
-    trans = trans.sort_values("score", ascending=False)
+    t = t.sort_values("score", ascending=False)
 
-    diamond = []
+    out = []
     prev = None
 
-    for _, r in trans.iterrows():
-        gap = 0.0 if prev is None else float(prev.score - r.score)
+    for _, r in t.iterrows():
+        gap = 0 if prev is None else prev.score - r.score
 
-        if prev is None or gap >= 0.15 or r.score > trans.score.quantile(0.85):
-            diamond.append({
+        if prev is None or gap >= 0.15 or r.score > t.score.quantile(0.85):
+            out.append({
                 "ticker": r.ticker,
-                "score": float(r.score),
-                "gap": float(gap)
+                "score": r.score,
+                "gap": gap
             })
 
         prev = r
-        if len(diamond) >= 5:
+        if len(out) >= 5:
             break
 
-    return diamond
+    return out
 
 # =========================
-# BUY
+# BUY (delta integrated)
 # =========================
 def build_buy(df):
-    buy = df.copy()
+    d = df.copy()
 
     structure = (
-        (buy["phase"] == "TRANSITION") * 0.9 +
-        (buy["phase"] == "CONT") * 0.6 +
-        (buy["phase"] == "EARLY") * 0.15
+        (d["phase"] == "TRANSITION") * 0.9 +
+        (d["phase"] == "CONT") * 0.6 +
+        (d["phase"] == "EARLY") * 0.15
     )
 
     structure = np.minimum(structure, 1.1)
 
-    redundancy_penalty = (
-        (buy["phase"] == "TRANSITION") &
-        (buy["breakout"])
-    ) * 0.2
+    # ★ ③ deltaをここで活用
+    momentum_bonus = np.clip(d["delta"], 0, 2.0)
 
-    buy_score = (
-        buy["score"] +
-        structure * 0.6 -
-        redundancy_penalty
+    score = (
+        d["score"] +
+        structure * 0.6 +
+        momentum_bonus * 0.8
     )
 
-    buy["buy_score"] = buy_score
+    d["buy_score"] = score
 
-    buy = buy.sort_values("buy_score", ascending=False)
-
-    return buy.head(5).to_dict("records")
+    return d.sort_values("buy_score", ascending=False).head(5).to_dict("records")
 
 # =========================
 # RUN
@@ -211,8 +227,8 @@ def run():
     results = []
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = {ex.submit(fetch, session, t): t for t in universe}
-        for f in as_completed(futures):
+        futs = {ex.submit(fetch, session, t): t for t in universe}
+        for f in as_completed(futs):
             r = f.result()
             if r:
                 results.append(r)
@@ -228,45 +244,29 @@ def run():
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    msg = []
-    msg.append("🚀 GrowthRadar v37.16 (FINAL STABLE SCORE MODEL)")
-    msg.append(f"Scan:{len(universe)} Valid:{len(df)}")
-    msg.append(f"Time:{now}")
-    msg.append("")
+    print(f"🚀 GrowthRadar v37.17 (REDIS DELTA MODEL)")
+    print(f"Scan:{len(universe)} Valid:{len(df)}")
+    print(f"Time:{now}\n")
 
-    msg.append("💎 BUY SIGNAL")
-    if buy:
-        for b in buy:
-            msg.append(f"**{b['ticker']}** S:{b['buy_score']:.2f}")
-    else:
-        msg.append("None")
+    print("💎 BUY SIGNAL")
+    for b in buy:
+        print(f"**{b['ticker']}** S:{b['buy_score']:.2f}")
 
-    msg.append("")
-    msg.append("🔥 EARLY")
-    early = df[df.phase=="EARLY"].sort_values("score", ascending=False).head(4)
-    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in early.iterrows()] or ["None"]
+    print("\n🔥 EARLY")
+    early = df[df.phase=="EARLY"].head(4)
+    print("\n".join([f"{r.ticker} S:{r.score:.2f}" for _, r in early.iterrows()]) or "None")
 
-    msg.append("")
-    msg.append("⚡ TRANSITION")
-    trans = df[df.phase=="TRANSITION"].sort_values("score", ascending=False).head(4)
-    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in trans.iterrows()] or ["None"]
+    print("\n⚡ TRANSITION")
+    trans = df[df.phase=="TRANSITION"].head(4)
+    print("\n".join([f"{r.ticker} S:{r.score:.2f}" for _, r in trans.iterrows()]) or "None")
 
-    msg.append("")
-    msg.append("🔁 CONT")
-    cont = df[df.phase=="CONT"].sort_values("score", ascending=False).head(4)
-    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in cont.iterrows()] or ["None"]
+    print("\n🔁 CONT")
+    cont = df[df.phase=="CONT"].head(4)
+    print("\n".join([f"{r.ticker} S:{r.score:.2f}" for _, r in cont.iterrows()]) or "None")
 
-    msg.append("")
-    msg.append("🧨 BREAKOUT (event)")
+    print("\n🧨 BREAKOUT (event)")
     brk = df[df.breakout].head(4)
-    msg += [f"{r.ticker}" for _, r in brk.iterrows()] or ["None"]
-
-    text = "\n".join(msg)
-
-    print(text)
-
-    if WEBHOOK_URL:
-        requests.post(WEBHOOK_URL, json={"content": text[:1900]})
+    print("\n".join([f"{r.ticker}" for _, r in brk.iterrows()]) or "None")
 
 if __name__ == "__main__":
     run()
