@@ -42,11 +42,9 @@ else:
 # =========================
 def load_universe():
     symbols = set()
-
     try:
         url = "https://raw.githubusercontent.com/datasets/nasdaq-listings/master/data/nasdaq-listed-symbols.csv"
         data = requests.get(url, timeout=10).text.splitlines()[1:]
-
         for l in data:
             s = l.split(",")[0].strip().upper()
             if re.match(r"^[A-Z]{1,6}$", s):
@@ -62,7 +60,6 @@ def load_universe():
     symbols.update(fallback)
     symbols = list(symbols)
     random.shuffle(symbols)
-
     return symbols[:SCAN_SIZE]
 
 # =========================
@@ -72,7 +69,6 @@ def fetch(session, ticker):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=6mo&interval=1d"
         res = session.get(url, timeout=5)
-
         if res.status_code != 200:
             return None
 
@@ -97,14 +93,10 @@ def fetch(session, ticker):
 
         m1 = ret(close[-1], close[-21])
         m3 = ret(close[-1], close[-63])
-
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
-        # =========================
         # PHASE
-        # =========================
         phase = "NONE"
-
         if (0.25 < m1 < 0.7 and m3 < 0.6):
             phase = "EARLY"
         elif (m1 > 0.45 and m3 > 0.45):
@@ -112,9 +104,7 @@ def fetch(session, ticker):
         elif (m3 > 1.0):
             phase = "CONT"
 
-        # =========================
         # BREAKOUT
-        # =========================
         price_jump = abs(close[-1] - close[-2]) / close[-2]
         vol_spike = volume[-1] / (vol_base + 1e-9)
         trend_ok = close[-1] > close[-2] > close[-3]
@@ -124,9 +114,7 @@ def fetch(session, ticker):
             (price_jump > 0.015 and vol_spike > 2.3)
         ) and trend_ok
 
-        # =========================
         # BASE SCORE
-        # =========================
         base_score = (
             m1 * 0.6 +
             m3 * 0.3 +
@@ -134,12 +122,8 @@ def fetch(session, ticker):
             breakout * 0.4
         )
 
-        # =========================
-        # REDIS DELTA
-        # =========================
+        # REDIS
         delta = 0.0
-        phase_weight = 1.0
-
         if r:
             prev = r.get(f"score:{ticker}")
             if prev is not None:
@@ -148,9 +132,8 @@ def fetch(session, ticker):
             r.set(f"score:{ticker}", base_score, ex=3600)
             r.set(f"phase:{ticker}", phase, ex=86400)
 
-        # =========================
         # PHASE WEIGHT
-        # =========================
+        phase_weight = 1.0
         if phase == "EARLY":
             phase_weight = 1.05
         elif phase == "TRANSITION":
@@ -158,12 +141,9 @@ def fetch(session, ticker):
         elif phase == "CONT":
             phase_weight = 0.95
 
-        # =========================
-        # FINAL SCORE
-        # =========================
         score = (base_score + max(delta, 0) * 0.8) * phase_weight
 
-        # DEBUG（ローカルのみ）
+        # ★ ログ専用
         print(f"[REDIS] {ticker} score={score:.2f} delta={delta:.2f} phase={phase}")
 
         return {
@@ -177,18 +157,47 @@ def fetch(session, ticker):
         return None
 
 # =========================
-# DISCORD
+# DISCORD（ログ除外）
 # =========================
-def send_discord(df):
+def build_discord_message(redis_connected, df):
+    msg = ""
+
+    msg += f"🟢 Redis: {'CONNECTED' if redis_connected else 'OFF'}\n"
+    msg += "🚀 GrowthRadar v37.18 (REDIS ANALYTICS MODEL)\n"
+    msg += f"Scan:1500 Valid:{len(df)}\n"
+    msg += f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+
+    msg += "💎 BUY SIGNAL\n"
+    buy = df.sort_values("score", ascending=False).head(5)
+    for _, r in buy.iterrows():
+        msg += f"**{r.ticker}** S:{r.score:.2f}\n"
+
+    msg += "🔥 EARLY\n"
+    early = df[df.phase=="EARLY"].head(4)
+    msg += "\n".join([f"{r.ticker} S:{r.score:.2f}" for _, r in early.iterrows()]) or "None"
+    msg += "\n"
+
+    msg += "⚡ TRANSITION\n"
+    trans = df[df.phase=="TRANSITION"].head(4)
+    msg += "\n".join([f"{r.ticker} S:{r.score:.2f}" for _, r in trans.iterrows()]) or "None"
+    msg += "\n"
+
+    msg += "🔁 CONT\n"
+    cont = df[df.phase=="CONT"].head(4)
+    msg += "\n".join([f"{r.ticker} S:{r.score:.2f}" for _, r in cont.iterrows()]) or "None"
+    msg += "\n"
+
+    msg += "🧨 BREAKOUT (event)\n"
+    brk = df[df.breakout].head(4)
+    msg += "\n".join(brk.ticker.values) or "None"
+
+    return msg
+
+def send_discord(redis_connected, df):
     if not WEBHOOK_URL:
         return
 
-    msg = "🚀 GrowthRadar\n\n💎 BUY SIGNAL\n"
-
-    buy = df.sort_values("score", ascending=False).head(5)
-
-    for _, r in buy.iterrows():
-        msg += f"**{r.ticker}** S:{r.score:.2f}\n"
+    msg = build_discord_message(redis_connected, df)
 
     if len(msg) > 1900:
         msg = msg[:1900] + "\n...(cut)"
@@ -196,7 +205,7 @@ def send_discord(df):
     requests.post(WEBHOOK_URL, json={"content": msg})
 
 # =========================
-# OUTPUT（固定フォーマット）
+# OUTPUT（ログ）
 # =========================
 def print_output(redis_connected, df):
     print(f"🟢 Redis: {'CONNECTED' if redis_connected else 'OFF'}")
@@ -210,20 +219,16 @@ def print_output(redis_connected, df):
         print(f"**{r.ticker}** S:{r.score:.2f}")
 
     print("\n🔥 EARLY")
-    early = df[df.phase=="EARLY"].head(4)
-    print("\n".join([f"{r.ticker} S:{r.score:.2f}" for _, r in early.iterrows()]) or "None")
+    print("\n".join([f"{r.ticker} S:{r.score:.2f}" for _, r in df[df.phase=="EARLY"].head(4).iterrows()]) or "None")
 
     print("\n⚡ TRANSITION")
-    trans = df[df.phase=="TRANSITION"].head(4)
-    print("\n".join([f"{r.ticker} S:{r.score:.2f}" for _, r in trans.iterrows()]) or "None")
+    print("\n".join([f"{r.ticker} S:{r.score:.2f}" for _, r in df[df.phase=="TRANSITION"].head(4).iterrows()]) or "None")
 
     print("\n🔁 CONT")
-    cont = df[df.phase=="CONT"].head(4)
-    print("\n".join([f"{r.ticker} S:{r.score:.2f}" for _, r in cont.iterrows()]) or "None")
+    print("\n".join([f"{r.ticker} S:{r.score:.2f}" for _, r in df[df.phase=="CONT"].head(4).iterrows()]) or "None")
 
     print("\n🧨 BREAKOUT (event)")
-    brk = df[df.breakout].head(4)
-    print("\n".join(brk.ticker.values) or "None")
+    print("\n".join(df[df.breakout].head(4).ticker.values) or "None")
 
 # =========================
 # RUN
@@ -238,16 +243,14 @@ def run():
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futs = {ex.submit(fetch, session, t): t for t in universe}
         for f in as_completed(futs):
-            r = f.result()
-            if r:
-                results.append(r)
+            rlt = f.result()
+            if rlt:
+                results.append(rlt)
 
     df = pd.DataFrame(results)
 
     print_output(r is not None, df)
-
-    # ★ Discord通知（BUYのみ）
-    send_discord(df)
+    send_discord(r is not None, df)
 
 if __name__ == "__main__":
     run()
