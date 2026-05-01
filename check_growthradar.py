@@ -8,9 +8,6 @@ import pandas as pd
 import numpy as np
 import redis
 
-# =========================
-# CONFIG
-# =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
 REDIS_URL = os.environ.get("REDIS_URL")
 
@@ -23,26 +20,21 @@ MIN_VOL = 300000
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # =========================
-# REDIS INIT
+# REDIS
 # =========================
 r = None
 if REDIS_URL:
     try:
         r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
         r.ping()
-        print("🟢 Redis: CONNECTED")
     except:
-        print("🔴 Redis: FAILED")
         r = None
-else:
-    print("⚠️ Redis: NOT SET")
 
 # =========================
 # UNIVERSE
 # =========================
 def load_universe():
     symbols = set()
-
     try:
         url = "https://raw.githubusercontent.com/datasets/nasdaq-listings/master/data/nasdaq-listed-symbols.csv"
         data = requests.get(url, timeout=10).text.splitlines()[1:]
@@ -53,18 +45,15 @@ def load_universe():
     except:
         pass
 
-    fallback = [
-        "AAPL","MSFT","NVDA","AMD","AMZN","META","GOOGL","TSLA",
-        "INTC","QCOM","AVGO","TSM","ASML","MU","PLTR","SNOW","CRWD"
-    ]
-
+    fallback = ["AAPL","MSFT","NVDA","AMD","AMZN","META","GOOGL","TSLA","QCOM"]
     symbols.update(fallback)
+
     symbols = list(symbols)
     random.shuffle(symbols)
     return symbols[:SCAN_SIZE]
 
 # =========================
-# FETCH (v38.1)
+# FETCH
 # =========================
 def fetch(session, ticker):
     try:
@@ -74,9 +63,8 @@ def fetch(session, ticker):
             return None
 
         data = res.json()["chart"]["result"][0]
-
-        close = [x for x in data["indicators"]["quote"][0]["close"] if x is not None]
-        volume = [x for x in data["indicators"]["quote"][0]["volume"] if x is not None]
+        close = [x for x in data["indicators"]["quote"][0]["close"] if x]
+        volume = [x for x in data["indicators"]["quote"][0]["volume"] if x]
 
         if len(close) < 60:
             return None
@@ -114,50 +102,51 @@ def fetch(session, ticker):
         ) and trend_ok
 
         # ===== STATE =====
-        raw_score = (
-            m1 * 0.6 +
-            m3 * 0.3 +
-            vol_ratio * 0.1 +
-            breakout * 0.4
-        )
-
-        state = 8.5 * (1 - np.exp(-raw_score / 8.5))
+        raw = m1*0.6 + m3*0.3 + vol_ratio*0.1 + breakout*0.4
+        state = 8.5 * (1 - np.exp(-raw / 8.5))
 
         # ===== REDIS =====
-        delta1 = 0.0
-        delta2 = 0.0
+        delta1 = 0
+        delta2 = 0
         prev_phase = None
 
         if r:
-            prev1 = r.get(f"score:{ticker}")
-            prev2 = r.get(f"score_prev:{ticker}")
-            prev_phase = r.get(f"phase:{ticker}")
+            p1 = r.get(f"s:{ticker}")
+            p2 = r.get(f"s2:{ticker}")
+            prev_phase = r.get(f"p:{ticker}")
 
-            if prev1 and prev2:
-                prev1 = float(prev1)
-                prev2 = float(prev2)
-                delta1 = state - prev1
-                delta2 = prev1 - prev2
+            if p1 and p2:
+                p1 = float(p1)
+                p2 = float(p2)
+                delta1 = state - p1
+                delta2 = p1 - p2
 
-            if prev1:
-                r.set(f"score_prev:{ticker}", prev1, ex=7200)
+            if p1:
+                r.set(f"s2:{ticker}", p1, ex=7200)
 
-            r.set(f"score:{ticker}", state, ex=7200)
-            r.set(f"phase:{ticker}", phase, ex=86400)
+            r.set(f"s:{ticker}", state, ex=7200)
+            r.set(f"p:{ticker}", phase, ex=86400)
 
-        # ===== CHANGE（制御版）=====
+        # ===== PRICE CHANGE =====
         valid_delta = delta1 > 0.05
-
         up = max(delta1, 0) if valid_delta else 0
         accel = max(delta1 - delta2, 0) if valid_delta else 0
 
-        change = (
-            up * 0.6 +
-            accel * 0.8 +
-            (valid_delta and delta2 > 0) * 0.5
-        )
+        price_change = up*0.6 + accel*0.8
 
-        change = min(change, 1.5)  # ★暴走制御
+        # ===== VOLUME CHANGE（38.2追加）=====
+        vol_trend = volume[-1] > volume[-2] > volume[-3]
+        vol_accel = volume[-1] / (volume[-3] + 1e-9)
+
+        vol_change = 0
+        if vol_trend:
+            vol_change += 0.3
+        if vol_accel > 1.5:
+            vol_change += min((vol_accel - 1.5) * 0.2, 0.6)
+
+        # ===== TOTAL CHANGE =====
+        change = price_change + vol_change
+        change = min(change, 1.5)
 
         # ===== PHASE BOOST =====
         phase_boost = 1.0
@@ -170,16 +159,11 @@ def fetch(session, ticker):
         elif phase == "CONT":
             phase_boost = 0.95
 
-        # ===== EVENT =====
-        event_boost = 1.05 if breakout else 1.0
-
         # ===== LIQUIDITY =====
-        liquidity_penalty = min(1.0, vol_base / 1_000_000)
+        liquidity = min(1.0, vol_base / 1_000_000)
 
         # ===== FINAL =====
-        final = state * (1 + change) * phase_boost * event_boost * liquidity_penalty
-
-        print(f"[v38.1] {ticker} S:{final:.2f} Δ1:{delta1:.3f} Δ2:{delta2:.3f} LQ:{liquidity_penalty:.2f}")
+        final = state * (1 + change) * phase_boost * liquidity
 
         return {
             "ticker": ticker,
@@ -194,19 +178,17 @@ def fetch(session, ticker):
 # =========================
 # DISCORD
 # =========================
-def build_discord(df):
+def build_msg(df):
     msg = []
 
-    msg.append(f"🟢 Redis: {'ON' if r else 'OFF'}")
-    msg.append("🚀 GrowthRadar v38.1 (CONTROLLED)")
+    msg.append(f"🚀 GrowthRadar v38.2 (STATE × CHANGE × VOLUME)")
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    msg.append("")
+    msg.append(f"🟢 Redis: {'ON' if r else 'OFF'}")
 
-    msg.append("💎 BUY SIGNAL")
-    buy = df.sort_values("score", ascending=False).head(5)
-    for _, row in buy.iterrows():
-        msg.append(f"{row.ticker} S:{row.score:.2f}")
+    msg.append("\n💎 BUY SIGNAL")
+    for _, r0 in df.sort_values("score", ascending=False).head(5).iterrows():
+        msg.append(f"{r0.ticker} S:{r0.score:.2f}")
 
     msg.append("\n🔥 EARLY")
     msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in df[df.phase=="EARLY"].head(4).iterrows()] or ["None"]
@@ -239,13 +221,9 @@ def run():
             if rlt:
                 results.append(rlt)
 
-    if not results:
-        print("NO DATA")
-        return
-
     df = pd.DataFrame(results)
 
-    text = build_discord(df)
+    text = build_msg(df)
     print(text)
 
     if WEBHOOK_URL:
