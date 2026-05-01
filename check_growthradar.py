@@ -1,10 +1,16 @@
-import os, requests, random, re
+import os
+import requests
+import random
+import re
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import numpy as np
 import redis
 
+# =========================
+# CONFIG
+# =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
 REDIS_URL = os.environ.get("REDIS_URL")
 
@@ -86,7 +92,8 @@ def fetch(session, ticker):
         if vol_base < MIN_VOL:
             return None
 
-        def ret(a,b): return (a/b - 1) if b else 0
+        def ret(a,b):
+            return (a/b - 1) if b else 0
 
         m1 = ret(close[-1], close[-21])
         m3 = ret(close[-1], close[-63])
@@ -118,7 +125,7 @@ def fetch(session, ticker):
         ) and trend_ok
 
         # =========================
-        # SCORE
+        # BASE SCORE
         # =========================
         base_score = (
             m1 * 0.6 +
@@ -127,6 +134,9 @@ def fetch(session, ticker):
             breakout * 0.4
         )
 
+        # =========================
+        # REDIS DELTA
+        # =========================
         delta = 0.0
         phase_weight = 1.0
 
@@ -138,7 +148,9 @@ def fetch(session, ticker):
             r.set(f"score:{ticker}", base_score, ex=3600)
             r.set(f"phase:{ticker}", phase, ex=86400)
 
-        # phase weight（ロジック維持）
+        # =========================
+        # PHASE WEIGHT
+        # =========================
         if phase == "EARLY":
             phase_weight = 1.05
         elif phase == "TRANSITION":
@@ -146,18 +158,18 @@ def fetch(session, ticker):
         elif phase == "CONT":
             phase_weight = 0.95
 
+        # =========================
+        # FINAL SCORE
+        # =========================
         score = (base_score + max(delta, 0) * 0.8) * phase_weight
 
-        # =========================
         # DEBUG LOG（ローカルのみ）
-        # =========================
         print(f"[REDIS] {ticker} score={score:.2f} delta={delta:.2f} phase={phase}")
 
         return {
             "ticker": ticker,
             "phase": phase,
             "score": float(score),
-            "delta": float(delta),
             "breakout": bool(breakout)
         }
 
@@ -165,7 +177,7 @@ def fetch(session, ticker):
         return None
 
 # =========================
-# BUY
+# BUY SIGNAL
 # =========================
 def build_buy(df):
     d = df.copy()
@@ -181,21 +193,34 @@ def build_buy(df):
     return d.sort_values("buy_score", ascending=False).head(5).to_dict("records")
 
 # =========================
-# DISCORD
+# OUTPUT (FIXED FORMAT)
 # =========================
-def send_discord(df):
-    if not WEBHOOK_URL:
-        return
+def print_output(redis_connected, df):
+    print(f"🟢 Redis: {'CONNECTED' if redis_connected else 'OFF'}")
+    print("🚀 GrowthRadar v37.18 (REDIS ANALYTICS MODEL)")
+    print(f"Scan:1500 Valid:{len(df)}")
+    print(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
 
-    msg = "🚀 GrowthRadar\n\n💎 BUY SIGNAL\n"
+    print("💎 BUY SIGNAL")
+    buy = df.sort_values("score", ascending=False).head(5)
+    for _, r in buy.iterrows():
+        print(f"**{r.ticker}** S:{r.score:.2f}")
 
-    for _, r in df.iterrows():
-        msg += f"**{r.ticker}** S:{r.score:.2f}\n"
+    print("\n🔥 EARLY")
+    early = df[df.phase=="EARLY"].head(4)
+    print("\n".join([f"{r.ticker} S:{r.score:.2f}" for _, r in early.iterrows()]) or "None")
 
-    if len(msg) > 1900:
-        msg = msg[:1900] + "\n...(cut)"
+    print("\n⚡ TRANSITION")
+    trans = df[df.phase=="TRANSITION"].head(4)
+    print("\n".join([f"{r.ticker} S:{r.score:.2f}" for _, r in trans.iterrows()]) or "None")
 
-    requests.post(WEBHOOK_URL, json={"content": msg})
+    print("\n🔁 CONT")
+    cont = df[df.phase=="CONT"].head(4)
+    print("\n".join([f"{r.ticker} S:{r.score:.2f}" for _, r in cont.iterrows()]) or "None")
+
+    print("\n🧨 BREAKOUT (event)")
+    brk = df[df.breakout].head(4)
+    print("\n".join(brk.ticker.values) or "None")
 
 # =========================
 # RUN
@@ -218,18 +243,7 @@ def run():
 
     buy = build_buy(df)
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-    print(f"\n🚀 GrowthRadar v37.20 (STABLE OPS)")
-    print(f"Scan:{len(universe)} Valid:{len(df)}")
-    print(f"Time:{now}\n")
-
-    print("💎 BUY SIGNAL")
-    for b in buy:
-        print(f"{b['ticker']} S:{b['buy_score']:.2f}")
-
-    # ★ Discordは“結果のみ”
-    send_discord(df.sort_values("score", ascending=False).head(5))
+    print_output(r is not None, df)
 
 if __name__ == "__main__":
     run()
