@@ -31,7 +31,7 @@ if REDIS_URL:
         r = None
 
 # =========================
-# THEME MAP（簡易）
+# THEME MAP
 # =========================
 THEME_MAP = {
     "semi": {"NVDA","AMD","QCOM","AVGO","TSM","MU","ASML","COHU","AMKR","DIOD","LSCC","NVTS","RMBS","MRAM"},
@@ -96,23 +96,22 @@ def fetch(session, ticker):
         if vol_base < MIN_VOL:
             return None
 
-        def ret(a, b):
-            return (a / b - 1) if b else 0
+        def ret(a,b): return (a/b - 1) if b else 0
 
         m1 = ret(close[-1], close[-21])
         m3 = ret(close[-1], close[-63])
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
-        # ===== PHASE
+        # PHASE
         phase = "NONE"
-        if 0.25 < m1 < 0.7 and m3 < 0.6:
+        if (0.25 < m1 < 0.7 and m3 < 0.6):
             phase = "EARLY"
-        elif m1 > 0.45 and m3 > 0.45:
+        elif (m1 > 0.45 and m3 > 0.45):
             phase = "TRANSITION"
-        elif m3 > 1.0:
+        elif (m3 > 1.0):
             phase = "CONT"
 
-        # ===== BREAKOUT
+        # BREAKOUT
         price_jump = abs(close[-1] - close[-2]) / close[-2]
         trend_ok = close[-1] > close[-2] > close[-3]
         breakout = (
@@ -121,19 +120,23 @@ def fetch(session, ticker):
             and trend_ok
         )
 
-        # ===== STATE
+        # STATE
         raw = m1*0.6 + m3*0.3 + vol_ratio*0.1 + breakout*0.4
         state = 8.5 * (1 - np.exp(-raw / 8.5))
 
-        # ===== REDIS
-        delta1 = 0
-        delta2 = 0
+        # REDIS
+        delta1, delta2 = 0, 0
         prev_phase = None
+        prev_streak = 0
 
         if r:
             p1 = r.get(f"s:{ticker}")
             p2 = r.get(f"s2:{ticker}")
             prev_phase = r.get(f"p:{ticker}")
+            ps = r.get(f"streak:{ticker}")
+
+            if ps:
+                prev_streak = int(ps)
 
             if p1 and p2:
                 p1 = float(p1)
@@ -147,19 +150,22 @@ def fetch(session, ticker):
             r.set(f"s:{ticker}", state, ex=7200)
             r.set(f"p:{ticker}", phase, ex=86400)
 
-        # ===== CHANGE
+        # STREAK
+        streak = prev_streak + 1 if delta1 > 0 else 0
+        if r:
+            r.set(f"streak:{ticker}", streak, ex=86400)
+
+        # CHANGE
         up = max(delta1, 0)
         accel = max(delta1 - delta2, 0)
 
         price_change = up*0.6 + accel*0.8
-
         vol_trend = volume[-1] > volume[-2] > volume[-3]
         vol_change = 0.25 if vol_trend else 0
 
         change = min(price_change + vol_change, 1.5)
         effective_change = change * (0.3 + state * 0.4)
 
-        # ===== FACTORS
         state_factor = 0.4 + state * 0.6
 
         phase_boost = 1.0
@@ -172,27 +178,36 @@ def fetch(session, ticker):
         elif phase == "CONT":
             phase_boost = 1.05
 
-        score = state_factor * (1 + effective_change) * phase_boost
+        base_score = state_factor * (1 + effective_change) * phase_boost
+
+        # ===== STREAK BOOST
+        streak_boost = 1 + min(streak * 0.08, 0.6)
+
+        # ===== スパイク完全抑制
+        if streak <= 1 and delta1 > 1.0:
+            streak_boost *= 0.5
+
+        score = base_score * streak_boost
 
         return {
             "ticker": ticker,
             "phase": phase,
             "score": float(score),
             "breakout": breakout,
-            "theme": get_theme(ticker)
+            "theme": get_theme(ticker),
+            "streak": streak
         }
 
     except:
         return None
 
 # =========================
-# THEME BOOST
+# THEME強制
 # =========================
-def apply_theme_boost(df):
+def apply_theme_control(df):
     if len(df) == 0:
         return df
 
-    # 上位のみでテーマ強度計算
     top = df.sort_values("score", ascending=False).head(60)
 
     theme_strength = (
@@ -205,20 +220,23 @@ def apply_theme_boost(df):
         df["final_score"] = df["score"]
         return df
 
-    max_strength = theme_strength.max()
+    top_themes = theme_strength.sort_values(ascending=False).head(2).index
 
-    def boost(row):
+    def adjust(row):
         t = row["theme"]
-        if t == "other":
-            return row["score"]
 
-        s = theme_strength.get(t, 0)
-        norm = s / max_strength if max_strength else 0
+        if t == "leveraged":
+            return row["score"] * 0.5  # ETF減点
 
-        # 軽〜中ブースト
-        return row["score"] * (1 + norm * 0.45)
+        if t not in top_themes and t != "other":
+            return row["score"] * 0.7  # テーマ外減点
 
-    df["final_score"] = df.apply(boost, axis=1)
+        if t in top_themes:
+            return row["score"] * 1.25  # テーマ強制
+
+        return row["score"]
+
+    df["final_score"] = df.apply(adjust, axis=1)
     return df
 
 # =========================
@@ -231,13 +249,16 @@ def build_buy(df):
     theme_used = {}
 
     for _, row in df.iterrows():
-        theme = row["theme"]
+        t = row["theme"]
 
-        if theme != "other" and theme_used.get(theme, 0) >= 2:
+        if t != "other" and theme_used.get(t, 0) >= 2:
             continue
 
+        if t == "leveraged":
+            continue  # 完全除外
+
         result.append(row)
-        theme_used[theme] = theme_used.get(theme, 0) + 1
+        theme_used[t] = theme_used.get(t, 0) + 1
 
         if len(result) >= 5:
             break
@@ -249,13 +270,13 @@ def build_buy(df):
 # =========================
 def build_msg(df, buy):
     msg = []
-    msg.append("🚀 GrowthRadar v38.8 (THEME STRENGTH MODEL)")
+    msg.append("🚀 GrowthRadar v39.0 (TRADE MODEL)")
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append(f"🟢 Redis: {'ON' if r else 'OFF'}")
 
     msg.append("\n💎 BUY SIGNAL")
-    msg += [f"{x.ticker} S:{x.final_score:.2f}" for x in buy] or ["None"]
+    msg += [f"{x.ticker} S:{x.final_score:.2f} Streak:{x.streak}" for x in buy] or ["None"]
 
     msg.append("\n🔥 EARLY")
     msg += [f"{r.ticker} S:{r.final_score:.2f}" for _, r in df[df.phase=="EARLY"].head(4).iterrows()] or ["None"]
@@ -294,7 +315,7 @@ def run():
 
     df = pd.DataFrame(results)
 
-    df = apply_theme_boost(df)
+    df = apply_theme_control(df)
     buy = build_buy(df)
 
     text = build_msg(df, buy)
