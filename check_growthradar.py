@@ -46,7 +46,6 @@ def load_universe():
     try:
         url = "https://raw.githubusercontent.com/datasets/nasdaq-listings/master/data/nasdaq-listed-symbols.csv"
         data = requests.get(url, timeout=10).text.splitlines()[1:]
-
         for l in data:
             s = l.split(",")[0].strip().upper()
             if re.match(r"^[A-Z]{1,6}$", s):
@@ -62,11 +61,10 @@ def load_universe():
     symbols.update(fallback)
     symbols = list(symbols)
     random.shuffle(symbols)
-
     return symbols[:SCAN_SIZE]
 
 # =========================
-# FETCH (v38.0 CORE)
+# FETCH (v38.1)
 # =========================
 def fetch(session, ticker):
     try:
@@ -115,7 +113,7 @@ def fetch(session, ticker):
             (price_jump > 0.015 and vol_ratio > 2.3)
         ) and trend_ok
 
-        # ===== STATE SCORE (v37.16) =====
+        # ===== STATE =====
         raw_score = (
             m1 * 0.6 +
             m3 * 0.3 +
@@ -125,7 +123,7 @@ def fetch(session, ticker):
 
         state = 8.5 * (1 - np.exp(-raw_score / 8.5))
 
-        # ===== REDIS（履歴） =====
+        # ===== REDIS =====
         delta1 = 0.0
         delta2 = 0.0
         prev_phase = None
@@ -147,15 +145,19 @@ def fetch(session, ticker):
             r.set(f"score:{ticker}", state, ex=7200)
             r.set(f"phase:{ticker}", phase, ex=86400)
 
-        # ===== CHANGE =====
-        up = max(delta1, 0)
-        accel = max(delta1 - delta2, 0)
+        # ===== CHANGE（制御版）=====
+        valid_delta = delta1 > 0.05
+
+        up = max(delta1, 0) if valid_delta else 0
+        accel = max(delta1 - delta2, 0) if valid_delta else 0
 
         change = (
             up * 0.6 +
             accel * 0.8 +
-            (delta1 > 0 and delta2 > 0) * 0.5
+            (valid_delta and delta2 > 0) * 0.5
         )
+
+        change = min(change, 1.5)  # ★暴走制御
 
         # ===== PHASE BOOST =====
         phase_boost = 1.0
@@ -171,16 +173,18 @@ def fetch(session, ticker):
         # ===== EVENT =====
         event_boost = 1.05 if breakout else 1.0
 
-        # ===== FINAL SCORE =====
-        final = state * (1 + change) * phase_boost * event_boost
+        # ===== LIQUIDITY =====
+        liquidity_penalty = min(1.0, vol_base / 1_000_000)
 
-        print(f"[v38.0] {ticker} S:{final:.2f} Δ1:{delta1:.3f} Δ2:{delta2:.3f} PH:{phase}")
+        # ===== FINAL =====
+        final = state * (1 + change) * phase_boost * event_boost * liquidity_penalty
+
+        print(f"[v38.1] {ticker} S:{final:.2f} Δ1:{delta1:.3f} Δ2:{delta2:.3f} LQ:{liquidity_penalty:.2f}")
 
         return {
             "ticker": ticker,
             "phase": phase,
             "score": float(final),
-            "state": float(state),
             "breakout": breakout
         }
 
@@ -188,45 +192,33 @@ def fetch(session, ticker):
         return None
 
 # =========================
-# DISCORD FORMAT（修正版）
+# DISCORD
 # =========================
 def build_discord(df):
     msg = []
 
-    msg.append("🚀 GrowthRadar v38.0 (STATE × CHANGE)")
+    msg.append(f"🟢 Redis: {'ON' if r else 'OFF'}")
+    msg.append("🚀 GrowthRadar v38.1 (CONTROLLED)")
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("")
 
-    # BUY
     msg.append("💎 BUY SIGNAL")
     buy = df.sort_values("score", ascending=False).head(5)
-    for _, r in buy.iterrows():
-        msg.append(f"**{r.ticker}** S:{r.score:.2f}")
+    for _, row in buy.iterrows():
+        msg.append(f"{row.ticker} S:{row.score:.2f}")
 
-    # EARLY
-    msg.append("")
-    msg.append("🔥 EARLY")
-    early = df[df.phase=="EARLY"].sort_values("score", ascending=False).head(4)
-    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in early.iterrows()] or ["None"]
+    msg.append("\n🔥 EARLY")
+    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in df[df.phase=="EARLY"].head(4).iterrows()] or ["None"]
 
-    # TRANSITION
-    msg.append("")
-    msg.append("⚡ TRANSITION")
-    trans = df[df.phase=="TRANSITION"].sort_values("score", ascending=False).head(4)
-    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in trans.iterrows()] or ["None"]
+    msg.append("\n⚡ TRANSITION")
+    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in df[df.phase=="TRANSITION"].head(4).iterrows()] or ["None"]
 
-    # CONT
-    msg.append("")
-    msg.append("🔁 CONT")
-    cont = df[df.phase=="CONT"].sort_values("score", ascending=False).head(4)
-    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in cont.iterrows()] or ["None"]
+    msg.append("\n🔁 CONT")
+    msg += [f"{r.ticker} S:{r.score:.2f}" for _, r in df[df.phase=="CONT"].head(4).iterrows()] or ["None"]
 
-    # BREAKOUT
-    msg.append("")
-    msg.append("🧨 BREAKOUT (event)")
-    brk = df[df.breakout].head(4)
-    msg += [r.ticker for _, r in brk.iterrows()] or ["None"]
+    msg.append("\n🧨 BREAKOUT (event)")
+    msg += [r.ticker for _, r in df[df.breakout].head(4).iterrows()] or ["None"]
 
     return "\n".join(msg)
 
@@ -253,12 +245,10 @@ def run():
 
     df = pd.DataFrame(results)
 
-    # ログ出力
-    print(build_discord(df))
+    text = build_discord(df)
+    print(text)
 
-    # Discord送信
     if WEBHOOK_URL:
-        text = build_discord(df)
         requests.post(WEBHOOK_URL, json={"content": text[:1900]})
 
 if __name__ == "__main__":
