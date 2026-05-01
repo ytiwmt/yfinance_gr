@@ -32,6 +32,26 @@ else:
     print("⚠️ Redis: NOT SET")
 
 # =========================
+# DEBUG MODE
+# =========================
+DEBUG = True
+
+def redis_debug_log(ticker, score, delta, phase):
+    if not r or not DEBUG:
+        return
+
+    prev_score = r.get(f"score:{ticker}")
+    prev_phase = r.get(f"phase:{ticker}")
+
+    print(f"[REDIS DEBUG] {ticker}")
+    print(f"  prev_score={prev_score}")
+    print(f"  current_score={score:.4f}")
+    print(f"  delta={delta:.4f}")
+    print(f"  prev_phase={prev_phase}")
+    print(f"  new_phase={phase}")
+    print("")
+
+# =========================
 # UNIVERSE
 # =========================
 def load_universe():
@@ -90,7 +110,6 @@ def fetch(session, ticker):
 
         m1 = ret(close[-1], close[-21])
         m3 = ret(close[-1], close[-63])
-
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
         # =========================
@@ -128,49 +147,52 @@ def fetch(session, ticker):
         )
 
         # =========================
-        # REDIS FEATURES
+        # REDIS STATE LOAD
         # =========================
         delta = 0.0
         phase_weight = 1.0
 
+        prev_score = None
+        prev_phase = None
+
         if r:
-            # ---- delta（加速）
-            prev = r.get(f"score:{ticker}")
-            if prev is not None:
-                delta = float(base_score) - float(prev)
+            prev_score = r.get(f"score:{ticker}")
+            prev_phase = r.get(f"phase:{ticker}")
+
+            if prev_score is not None:
+                delta = base_score - float(prev_score)
 
             r.set(f"score:{ticker}", base_score, ex=3600)
-
-            # ---- phase memory
-            prev_phase = r.get(f"phase:{ticker}")
             r.set(f"phase:{ticker}", phase, ex=86400)
 
-            # =========================
-            # PHASE WEIGHTING
-            # =========================
-            if phase == "EARLY":
-                phase_weight = 1.05
-            elif phase == "TRANSITION":
-                phase_weight = 1.15
-            elif phase == "CONT":
-                phase_weight = 0.95
+        # =========================
+        # PHASE WEIGHT
+        # =========================
+        if phase == "EARLY":
+            phase_weight = 1.05
+        elif phase == "TRANSITION":
+            phase_weight = 1.15
+        elif phase == "CONT":
+            phase_weight = 0.95
 
         # =========================
-        # FINAL SCORE (核心変更)
+        # FINAL SCORE
         # =========================
-        score = (
-            base_score
-            + max(delta, 0) * 0.8
-        ) * phase_weight
+        score = (base_score + max(delta, 0) * 0.8) * phase_weight
+
+        # =========================
+        # DEBUG OUTPUT (核心追加)
+        # =========================
+        redis_debug_log(ticker, score, delta, phase)
 
         return {
             "ticker": ticker,
             "phase": phase,
             "score": float(score),
             "delta": float(delta),
-            "m1": float(m1),
-            "m3": float(m3),
-            "vol_ratio": float(vol_ratio),
+            "base": float(base_score),
+            "prev_score": float(prev_score) if prev_score else None,
+            "prev_phase": prev_phase,
             "breakout": bool(breakout)
         }
 
@@ -189,40 +211,9 @@ def build_buy(df):
         (d["phase"] == "EARLY") * 0.15
     )
 
-    structure = np.minimum(structure, 1.1)
-
     d["buy_score"] = d["score"] + structure * 0.5
 
     return d.sort_values("buy_score", ascending=False).head(5).to_dict("records")
-
-# =========================
-# DIAMOND
-# =========================
-def build_diamond(df):
-    t = df[df.phase == "TRANSITION"].copy()
-    if len(t) == 0:
-        return []
-
-    t = t.sort_values("score", ascending=False)
-
-    out = []
-    prev = None
-
-    for _, r in t.iterrows():
-        gap = 0 if prev is None else prev.score - r.score
-
-        if prev is None or gap >= 0.15 or r.score > t.score.quantile(0.85):
-            out.append({
-                "ticker": r.ticker,
-                "score": r.score,
-                "gap": gap
-            })
-
-        prev = r
-        if len(out) >= 5:
-            break
-
-    return out
 
 # =========================
 # RUN
@@ -241,40 +232,23 @@ def run():
             if r:
                 results.append(r)
 
-    if not results:
-        print("NO DATA")
-        return
-
     df = pd.DataFrame(results)
 
     buy = build_buy(df)
-    diamond = build_diamond(df)
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    print(f"🚀 GrowthRadar v37.18 (REDIS ANALYTICS MODEL)")
+    print(f"\n🚀 GrowthRadar v37.19 (DEBUG MODE)")
     print(f"Scan:{len(universe)} Valid:{len(df)}")
     print(f"Time:{now}\n")
 
     print("💎 BUY SIGNAL")
     for b in buy:
-        print(f"**{b['ticker']}** S:{b['buy_score']:.2f}")
+        print(f"{b['ticker']} S:{b['buy_score']:.2f}")
 
-    print("\n🔥 EARLY")
-    early = df[df.phase=="EARLY"].head(4)
-    print("\n".join([f"{r.ticker} S:{r.score:.2f}" for _, r in early.iterrows()]) or "None")
-
-    print("\n⚡ TRANSITION")
-    trans = df[df.phase=="TRANSITION"].head(4)
-    print("\n".join([f"{r.ticker} S:{r.score:.2f}" for _, r in trans.iterrows()]) or "None")
-
-    print("\n🔁 CONT")
-    cont = df[df.phase=="CONT"].head(4)
-    print("\n".join([f"{r.ticker} S:{r.score:.2f}" for _, r in cont.iterrows()]) or "None")
-
-    print("\n🧨 BREAKOUT (event)")
-    brk = df[df.breakout].head(4)
-    print("\n".join([f"{r.ticker}" for _, r in brk.iterrows()]) or "None")
+    print("\n🧪 DEBUG SUMMARY")
+    print("Redis tracking enabled:", r is not None)
+    print("Symbols with delta tracking:", len(df))
 
 if __name__ == "__main__":
     run()
