@@ -31,18 +31,20 @@ if REDIS_URL:
         r = None
 
 # =========================
-# SECTOR MAP（簡易版）
+# THEME MAP（簡易）
 # =========================
-SECTOR_MAP = {
-    "semiconductor": ["NVDA","AMD","QCOM","AVGO","TSM","MU","ASML","COHU","AMKR","DIOD","LSCC"],
-    "ai": ["PLTR","SNOW","AI","BBAI"],
-    "biotech": ["MRNA","NVAX","BNTX","REGN","VRTX","ALNY"],
-    "energy": ["XOM","CVX","SLB","HAL"],
+THEME_MAP = {
+    "semi": {"NVDA","AMD","QCOM","AVGO","TSM","MU","ASML","COHU","AMKR","DIOD","LSCC","NVTS","RMBS","MRAM"},
+    "ai": {"PLTR","SNOW","AI","BBAI","SOUN"},
+    "network": {"LITE","VIAV","AAOI","HLIT","CIEN","FSLY"},
+    "energy": {"XOM","CVX","SLB","HAL","WULF"},
+    "biotech": {"MRNA","NVAX","BNTX","REGN","VRTX","ALNY","HCAI","KALV"},
+    "leveraged": {"TQQQ","GGLL","AMZU","AMDL","NVDL"},
 }
 
-def get_sector(ticker):
-    for k, v in SECTOR_MAP.items():
-        if ticker in v:
+def get_theme(ticker):
+    for k, vals in THEME_MAP.items():
+        if ticker in vals:
             return k
     return "other"
 
@@ -53,9 +55,9 @@ def load_universe():
     symbols = set()
     try:
         url = "https://raw.githubusercontent.com/datasets/nasdaq-listings/master/data/nasdaq-listed-symbols.csv"
-        data = requests.get(url, timeout=10).text.splitlines()[1:]
-        for l in data:
-            s = l.split(",")[0].strip().upper()
+        rows = requests.get(url, timeout=10).text.splitlines()[1:]
+        for row in rows:
+            s = row.split(",")[0].strip().upper()
             if re.match(r"^[A-Z]{1,6}$", s):
                 symbols.add(s)
     except:
@@ -94,35 +96,36 @@ def fetch(session, ticker):
         if vol_base < MIN_VOL:
             return None
 
-        def ret(a,b): return (a/b - 1) if b else 0
+        def ret(a, b):
+            return (a / b - 1) if b else 0
 
         m1 = ret(close[-1], close[-21])
         m3 = ret(close[-1], close[-63])
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
-        # PHASE
+        # ===== PHASE
         phase = "NONE"
-        if (0.25 < m1 < 0.7 and m3 < 0.6):
+        if 0.25 < m1 < 0.7 and m3 < 0.6:
             phase = "EARLY"
-        elif (m1 > 0.45 and m3 > 0.45):
+        elif m1 > 0.45 and m3 > 0.45:
             phase = "TRANSITION"
-        elif (m3 > 1.0):
+        elif m3 > 1.0:
             phase = "CONT"
 
-        # BREAKOUT
+        # ===== BREAKOUT
         price_jump = abs(close[-1] - close[-2]) / close[-2]
         trend_ok = close[-1] > close[-2] > close[-3]
-
         breakout = (
-            (price_jump > 0.02 and vol_ratio > 1.8) or
-            (price_jump > 0.015 and vol_ratio > 2.3)
-        ) and trend_ok
+            ((price_jump > 0.02 and vol_ratio > 1.8) or
+             (price_jump > 0.015 and vol_ratio > 2.3))
+            and trend_ok
+        )
 
-        # STATE
+        # ===== STATE
         raw = m1*0.6 + m3*0.3 + vol_ratio*0.1 + breakout*0.4
         state = 8.5 * (1 - np.exp(-raw / 8.5))
 
-        # REDIS
+        # ===== REDIS
         delta1 = 0
         delta2 = 0
         prev_phase = None
@@ -144,9 +147,10 @@ def fetch(session, ticker):
             r.set(f"s:{ticker}", state, ex=7200)
             r.set(f"p:{ticker}", phase, ex=86400)
 
-        # CHANGE
+        # ===== CHANGE
         up = max(delta1, 0)
         accel = max(delta1 - delta2, 0)
+
         price_change = up*0.6 + accel*0.8
 
         vol_trend = volume[-1] > volume[-2] > volume[-3]
@@ -155,13 +159,12 @@ def fetch(session, ticker):
         change = min(price_change + vol_change, 1.5)
         effective_change = change * (0.3 + state * 0.4)
 
-        # STATE FACTOR
+        # ===== FACTORS
         state_factor = 0.4 + state * 0.6
 
-        # PHASE BOOST
         phase_boost = 1.0
         if prev_phase == "EARLY" and phase == "TRANSITION":
-            phase_boost = 1.2
+            phase_boost = 1.20
         elif phase == "TRANSITION":
             phase_boost = 1.08
         elif phase == "EARLY":
@@ -169,54 +172,72 @@ def fetch(session, ticker):
         elif phase == "CONT":
             phase_boost = 1.05
 
-        base_score = state_factor * (1 + effective_change) * phase_boost
+        score = state_factor * (1 + effective_change) * phase_boost
 
         return {
             "ticker": ticker,
             "phase": phase,
-            "score": float(base_score),
+            "score": float(score),
             "breakout": breakout,
-            "sector": get_sector(ticker)
+            "theme": get_theme(ticker)
         }
 
     except:
         return None
 
 # =========================
-# SECTOR BOOST
+# THEME BOOST
 # =========================
-def apply_sector_boost(df):
-    sector_counts = df["sector"].value_counts()
+def apply_theme_boost(df):
+    if len(df) == 0:
+        return df
 
-    df["sector_strength"] = df["sector"].map(sector_counts)
+    # 上位のみでテーマ強度計算
+    top = df.sort_values("score", ascending=False).head(60)
 
-    # 正規化（max基準）
-    max_count = sector_counts.max()
-    df["sector_norm"] = df["sector_strength"] / max_count
+    theme_strength = (
+        top[top["theme"] != "other"]
+        .groupby("theme")["score"]
+        .sum()
+    )
 
-    # ★ 軽いブースト（重要）
-    df["final_score"] = df["score"] * (1 + df["sector_norm"] * 0.25)
+    if len(theme_strength) == 0:
+        df["final_score"] = df["score"]
+        return df
 
+    max_strength = theme_strength.max()
+
+    def boost(row):
+        t = row["theme"]
+        if t == "other":
+            return row["score"]
+
+        s = theme_strength.get(t, 0)
+        norm = s / max_strength if max_strength else 0
+
+        # 軽〜中ブースト
+        return row["score"] * (1 + norm * 0.45)
+
+    df["final_score"] = df.apply(boost, axis=1)
     return df
 
 # =========================
-# BUY（セクター制限あり）
+# BUY
 # =========================
 def build_buy(df):
     df = df.sort_values("final_score", ascending=False)
 
     result = []
-    sector_used = {}
+    theme_used = {}
 
-    for _, r0 in df.iterrows():
-        sec = r0["sector"]
+    for _, row in df.iterrows():
+        theme = row["theme"]
 
-        # 同一セクター最大2
-        if sector_used.get(sec, 0) >= 2:
+        if theme != "other" and theme_used.get(theme, 0) >= 2:
             continue
 
-        result.append(r0)
-        sector_used[sec] = sector_used.get(sec, 0) + 1
+        result.append(row)
+        theme_used[theme] = theme_used.get(theme, 0) + 1
 
         if len(result) >= 5:
             break
@@ -224,19 +245,17 @@ def build_buy(df):
     return result
 
 # =========================
-# DISCORD
+# MESSAGE
 # =========================
 def build_msg(df, buy):
     msg = []
-
-    msg.append("🚀 GrowthRadar v38.7 (SECTOR FLOW MODEL)")
+    msg.append("🚀 GrowthRadar v38.8 (THEME STRENGTH MODEL)")
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append(f"🟢 Redis: {'ON' if r else 'OFF'}")
 
     msg.append("\n💎 BUY SIGNAL")
-    for r0 in buy:
-        msg.append(f"{r0.ticker} S:{r0.final_score:.2f}")
+    msg += [f"{x.ticker} S:{x.final_score:.2f}" for x in buy] or ["None"]
 
     msg.append("\n🔥 EARLY")
     msg += [f"{r.ticker} S:{r.final_score:.2f}" for _, r in df[df.phase=="EARLY"].head(4).iterrows()] or ["None"]
@@ -265,13 +284,17 @@ def run():
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(fetch, session, t): t for t in universe}
         for f in as_completed(futures):
-            rlt = f.result()
-            if rlt:
-                results.append(rlt)
+            x = f.result()
+            if x:
+                results.append(x)
+
+    if not results:
+        print("NO DATA")
+        return
 
     df = pd.DataFrame(results)
 
-    df = apply_sector_boost(df)
+    df = apply_theme_boost(df)
     buy = build_buy(df)
 
     text = build_msg(df, buy)
