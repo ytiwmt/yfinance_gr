@@ -120,42 +120,58 @@ def fetch(session, ticker):
             and trend_ok
         )
 
-        # STATE
+        # =========================
+        # STATE（そのまま）
+        # =========================
         raw = m1*0.6 + m3*0.3 + vol_ratio*0.1 + breakout*0.4
         state = 8.5 * (1 - np.exp(-raw / 8.5))
 
-        # REDIS
+        # =========================
+        # REDIS（rawベースで保存）
+        # =========================
         delta1, delta2 = 0, 0
         prev_phase = None
         prev_streak = 0
 
         if r:
-            p1 = r.get(f"s:{ticker}")
-            p2 = r.get(f"s2:{ticker}")
+            p1_raw = r.get(f"r:{ticker}")
+            p2_raw = r.get(f"r2:{ticker}")
             prev_phase = r.get(f"p:{ticker}")
             ps = r.get(f"streak:{ticker}")
 
             if ps:
                 prev_streak = int(ps)
 
-            if p1 and p2:
-                p1 = float(p1)
-                p2 = float(p2)
-                delta1 = state - p1
-                delta2 = p1 - p2
+            if p1_raw and p2_raw:
+                p1_raw = float(p1_raw)
+                p2_raw = float(p2_raw)
+                delta1 = raw - p1_raw
+                delta2 = p1_raw - p2_raw
 
-            if p1:
-                r.set(f"s2:{ticker}", p1, ex=7200)
+            if p1_raw:
+                r.set(f"r2:{ticker}", p1_raw, ex=7200)
 
-            r.set(f"s:{ticker}", state, ex=7200)
+            r.set(f"r:{ticker}", raw, ex=7200)
             r.set(f"p:{ticker}", phase, ex=86400)
 
-        # STREAK
-        streak = prev_streak + 1 if delta1 > 0 else 0
+        # =========================
+        # STREAK（ノイズ耐性）
+        # =========================
+        threshold = 0.01
+
+        if delta1 > threshold:
+            streak = prev_streak + 1
+        elif delta1 > -threshold:
+            streak = prev_streak
+        else:
+            streak = 0
+
         if r:
             r.set(f"streak:{ticker}", streak, ex=86400)
 
+        # =========================
         # CHANGE
+        # =========================
         up = max(delta1, 0)
         accel = max(delta1 - delta2, 0)
 
@@ -181,16 +197,13 @@ def fetch(session, ticker):
         base_score = state_factor * (1 + effective_change) * phase_boost
 
         # =========================
-        # ★ 38.1の最小修正（ここだけ）
+        # STREAK BOOST（そのまま）
         # =========================
-
-        # ① streak未成熟救済
         if streak == 0:
             streak_boost = 0.85
         else:
             streak_boost = 1 + min(streak * 0.08, 0.6)
 
-        # ② スパイク抑制（緩和版）
         if streak <= 1 and delta1 > 1.0:
             streak_boost *= 0.7
 
@@ -209,7 +222,7 @@ def fetch(session, ticker):
         return None
 
 # =========================
-# THEME CONTROL（緩和）
+# THEME CONTROL（そのまま）
 # =========================
 def apply_theme_control(df):
     if len(df) == 0:
@@ -227,7 +240,6 @@ def apply_theme_control(df):
         df["final_score"] = df["score"]
         return df
 
-    # ★ ③ テーマ数を緩和（2→3）
     top_themes = theme_strength.sort_values(ascending=False).head(3).index
 
     def adjust(row):
@@ -278,7 +290,7 @@ def build_buy(df):
 # =========================
 def build_msg(df, buy):
     msg = []
-    msg.append("🚀 GrowthRadar v39.1 (WARMUP SAFE)")
+    msg.append("🚀 GrowthRadar v39.2 (TIME FIX MODEL)")
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append(f"🟢 Redis: {'ON' if r else 'OFF'}")
