@@ -26,9 +26,13 @@ HEADERS = {"User-Agent": "Mozilla/5.0"}
 # REDIS
 # =========================
 r = None
+
 if REDIS_URL:
     try:
-        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        r = redis.Redis.from_url(
+            REDIS_URL,
+            decode_responses=True
+        )
         r.ping()
     except:
         r = None
@@ -38,46 +42,67 @@ if REDIS_URL:
 # =========================
 THEME_MAP = {
     "semi": {
-        "NVDA","AMD","QCOM","AVGO","TSM","MU","ASML","COHU",
-        "AMKR","DIOD","LSCC","NVTS","RMBS","MRAM","AOSL",
-        "AXTI","MXL","LWLG","TTMI"
+        "NVDA","AMD","QCOM","AVGO","TSM","MU",
+        "ASML","COHU","AMKR","DIOD","LSCC",
+        "NVTS","RMBS","MRAM","AOSL","AXTI",
+        "MXL","LWLG","TTMI","INTC"
     },
+
     "ai": {
         "PLTR","SNOW","AI","BBAI","SOUN"
     },
+
     "network": {
-        "LITE","VIAV","AAOI","HLIT","CIEN","FSLY"
+        "LITE","VIAV","AAOI","HLIT",
+        "CIEN","FSLY"
     },
-    "energy": {
-        "XOM","CVX","SLB","HAL","WULF"
-    },
+
     "biotech": {
-        "MRNA","NVAX","BNTX","REGN","VRTX","ALNY",
-        "HCAI","KALV","CUE","AVTX"
+        "MRNA","BNTX","REGN","VRTX",
+        "ALNY","HCAI","KALV","CUE",
+        "AVTX","NBIX"
     },
+
+    "energy": {
+        "XOM","CVX","HAL","SLB","WULF"
+    },
+
     "leveraged": {
-        "TQQQ","GGLL","AMZU","AMDL","NVDL"
+        "TQQQ","NVDL","GGLL","AMDL","AMZU"
     }
 }
 
 def get_theme(ticker):
+
     for k, vals in THEME_MAP.items():
         if ticker in vals:
             return k
+
     return "other"
 
 # =========================
 # UNIVERSE
 # =========================
 def load_universe():
+
     symbols = set()
 
     try:
-        url = "https://raw.githubusercontent.com/datasets/nasdaq-listings/master/data/nasdaq-listed-symbols.csv"
-        rows = requests.get(url, timeout=10).text.splitlines()[1:]
+        url = (
+            "https://raw.githubusercontent.com/"
+            "datasets/nasdaq-listings/master/"
+            "data/nasdaq-listed-symbols.csv"
+        )
+
+        rows = requests.get(
+            url,
+            timeout=10
+        ).text.splitlines()[1:]
 
         for row in rows:
+
             s = row.split(",")[0].strip().upper()
+
             if re.match(r"^[A-Z]{1,6}$", s):
                 symbols.add(s)
 
@@ -85,13 +110,15 @@ def load_universe():
         pass
 
     fallback = [
-        "AAPL","MSFT","NVDA","AMD","AMZN",
-        "META","GOOGL","TSLA","QCOM"
+        "AAPL","MSFT","NVDA","AMD",
+        "META","AMZN","GOOGL",
+        "TSLA","QCOM"
     ]
 
     symbols.update(fallback)
 
     symbols = list(symbols)
+
     random.shuffle(symbols)
 
     return symbols[:SCAN_SIZE]
@@ -100,8 +127,14 @@ def load_universe():
 # FETCH
 # =========================
 def fetch(session, ticker):
+
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=6mo&interval=1d"
+
+        url = (
+            f"https://query1.finance.yahoo.com/"
+            f"v8/finance/chart/{ticker}"
+            f"?range=6mo&interval=1d"
+        )
 
         res = session.get(url, timeout=5)
 
@@ -144,37 +177,47 @@ def fetch(session, ticker):
         m1 = ret(close[-1], close[-21])
         m3 = ret(close[-1], close[-63])
 
-        vol_ratio = volume[-1] / (vol_base + 1e-9)
+        vol_ratio = (
+            volume[-1] /
+            (vol_base + 1e-9)
+        )
 
         phase = "NONE"
 
-        if (0.25 < m1 < 0.7 and m3 < 0.6):
+        if (
+            0.25 < m1 < 0.7 and
+            m3 < 0.6
+        ):
             phase = "EARLY"
 
-        elif (m1 > 0.45 and m3 > 0.45):
+        elif (
+            m1 > 0.45 and
+            m3 > 0.45
+        ):
             phase = "TRANSITION"
 
-        elif (m3 > 1.0):
+        elif m3 > 1.0:
             phase = "CONT"
 
         # =========================
         # BREAKOUT
         # =========================
-        day_change = ret(close[-1], close[-2])
+        d1 = ret(close[-1], close[-2])
 
         trend_ok = (
-            close[-1] > close[-2] >
+            close[-1] >
+            close[-2] >
             close[-3]
         )
 
         breakout = (
             (
-                day_change > 0.025 and
+                d1 > 0.025 and
                 vol_ratio > 1.8
             )
             or
             (
-                day_change > 0.018 and
+                d1 > 0.018 and
                 vol_ratio > 2.3
             )
         ) and trend_ok
@@ -196,19 +239,18 @@ def fetch(session, ticker):
         # =========================
         # REAL CHANGE
         # =========================
-        d1 = ret(close[-1], close[-2])   # 1d
-        d3 = ret(close[-1], close[-4])   # 3d
-        d5 = ret(close[-1], close[-6])   # 5d
-
-        vol_change = (
-            volume[-1] /
-            (volume[-2] + 1e-9)
-        )
+        d3 = ret(close[-1], close[-4])
+        d5 = ret(close[-1], close[-6])
 
         short_change = (
             d1 * 0.5 +
             d3 * 0.3 +
             d5 * 0.2
+        )
+
+        vol_change = (
+            volume[-1] /
+            (volume[-2] + 1e-9)
         )
 
         volume_accel = max(
@@ -223,8 +265,14 @@ def fetch(session, ticker):
         prev_streak = 0
 
         if r:
-            prev_short = r.get(f"short:{ticker}")
-            ps = r.get(f"streak:{ticker}")
+
+            prev_short = r.get(
+                f"short:{ticker}"
+            )
+
+            ps = r.get(
+                f"streak:{ticker}"
+            )
 
             if ps:
                 prev_streak = int(ps)
@@ -232,16 +280,22 @@ def fetch(session, ticker):
             delta = 0
 
             if prev_short:
-                delta = short_change - float(prev_short)
 
-                # =========================
-                # STREAK
-                # =========================
-                if short_change > 0.015:
+                delta = (
+                    short_change -
+                    float(prev_short)
+                )
+
+                # streak条件緩和
+                if short_change > 0.008:
+
                     if delta > -0.01:
-                        streak = prev_streak + 1
+                        streak = (
+                            prev_streak + 1
+                        )
                     else:
                         streak = prev_streak
+
                 else:
                     streak = 0
 
@@ -261,14 +315,14 @@ def fetch(session, ticker):
         # CHANGE SCORE
         # =========================
         change_score = (
-            short_change * 8 +
-            volume_accel * 0.35
+            short_change * 5.5 +
+            volume_accel * 0.25
         )
 
         change_score = np.clip(
             change_score,
             0,
-            2.0
+            1.5
         )
 
         # =========================
@@ -277,7 +331,7 @@ def fetch(session, ticker):
         phase_boost = 1.0
 
         if phase == "TRANSITION":
-            phase_boost = 1.18
+            phase_boost = 1.15
 
         elif phase == "EARLY":
             phase_boost = 1.05
@@ -292,22 +346,24 @@ def fetch(session, ticker):
 
         if streak >= 1:
             streak_boost += min(
-                streak * 0.12,
-                0.8
+                streak * 0.10,
+                0.6
             )
 
         # =========================
         # FINAL SCORE
         # =========================
-        score = (
+        raw_score = (
             state *
             (1 + change_score) *
             phase_boost *
             streak_boost
         )
 
-        # 暴走防止
-        score = min(score, 8.0)
+        # 自然圧縮
+        score = 10 * (
+            1 - np.exp(-raw_score / 10)
+        )
 
         return {
             "ticker": ticker,
@@ -337,18 +393,18 @@ def apply_theme_control(df):
         .head(60)
     )
 
-    theme_strength = (
+    strength = (
         top[top.theme != "other"]
         .groupby("theme")["score"]
         .sum()
     )
 
-    if len(theme_strength) == 0:
+    if len(strength) == 0:
         df["final_score"] = df["score"]
         return df
 
     top_themes = (
-        theme_strength
+        strength
         .sort_values(ascending=False)
         .head(3)
         .index
@@ -362,10 +418,10 @@ def apply_theme_control(df):
             return row["score"] * 0.45
 
         if t in top_themes:
-            return row["score"] * 1.22
+            return row["score"] * 1.18
 
         if t != "other":
-            return row["score"] * 0.72
+            return row["score"] * 0.78
 
         return row["score"]
 
@@ -387,7 +443,8 @@ def build_buy(df):
     )
 
     result = []
-    theme_used = {}
+
+    used_theme = {}
 
     for _, row in df.iterrows():
 
@@ -395,7 +452,7 @@ def build_buy(df):
 
         if (
             t != "other" and
-            theme_used.get(t,0) >= 2
+            used_theme.get(t,0) >= 2
         ):
             continue
 
@@ -404,8 +461,8 @@ def build_buy(df):
 
         result.append(row)
 
-        theme_used[t] = (
-            theme_used.get(t,0) + 1
+        used_theme[t] = (
+            used_theme.get(t,0) + 1
         )
 
         if len(result) >= 5:
@@ -421,7 +478,7 @@ def build_msg(df, buy):
     msg = []
 
     msg.append(
-        "🚀 GrowthRadar v39.3 (REAL CHANGE MODEL)"
+        "🚀 GrowthRadar v39.4 (BALANCED CHANGE MODEL)"
     )
 
     msg.append(
@@ -436,6 +493,7 @@ def build_msg(df, buy):
         f"🟢 Redis: {'ON' if r else 'OFF'}"
     )
 
+    # BUY
     msg.append("\n💎 BUY SIGNAL")
 
     if buy:
@@ -448,6 +506,7 @@ def build_msg(df, buy):
     else:
         msg.append("None")
 
+    # EARLY
     msg.append("\n🔥 EARLY")
 
     early = (
@@ -464,6 +523,7 @@ def build_msg(df, buy):
         for _, r in early.iterrows()
     ] or ["None"]
 
+    # TRANSITION
     msg.append("\n⚡ TRANSITION")
 
     trans = (
@@ -480,6 +540,7 @@ def build_msg(df, buy):
         for _, r in trans.iterrows()
     ] or ["None"]
 
+    # CONT
     msg.append("\n🔁 CONT")
 
     cont = (
@@ -496,6 +557,7 @@ def build_msg(df, buy):
         for _, r in cont.iterrows()
     ] or ["None"]
 
+    # BREAKOUT
     msg.append("\n🧨 BREAKOUT (event)")
 
     brk = df[df.breakout].head(4)
@@ -513,7 +575,10 @@ def build_msg(df, buy):
 def run():
 
     session = requests.Session()
-    session.headers.update(HEADERS)
+
+    session.headers.update(
+        HEADERS
+    )
 
     universe = load_universe()
 
@@ -550,9 +615,12 @@ def run():
     print(text)
 
     if WEBHOOK_URL:
+
         requests.post(
             WEBHOOK_URL,
-            json={"content": text[:1900]}
+            json={
+                "content": text[:1900]
+            }
         )
 
 if __name__ == "__main__":
