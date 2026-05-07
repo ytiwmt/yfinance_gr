@@ -8,6 +8,9 @@ import pandas as pd
 import numpy as np
 import redis
 
+# =========================
+# CONFIG
+# =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
 REDIS_URL = os.environ.get("REDIS_URL")
 
@@ -34,12 +37,27 @@ if REDIS_URL:
 # THEME MAP
 # =========================
 THEME_MAP = {
-    "semi": {"NVDA","AMD","QCOM","AVGO","TSM","MU","ASML","COHU","AMKR","DIOD","LSCC","NVTS","RMBS","MRAM"},
-    "ai": {"PLTR","SNOW","AI","BBAI","SOUN"},
-    "network": {"LITE","VIAV","AAOI","HLIT","CIEN","FSLY"},
-    "energy": {"XOM","CVX","SLB","HAL","WULF"},
-    "biotech": {"MRNA","NVAX","BNTX","REGN","VRTX","ALNY","HCAI","KALV"},
-    "leveraged": {"TQQQ","GGLL","AMZU","AMDL","NVDL"},
+    "semi": {
+        "NVDA","AMD","QCOM","AVGO","TSM","MU","ASML","COHU",
+        "AMKR","DIOD","LSCC","NVTS","RMBS","MRAM","AOSL",
+        "AXTI","MXL","LWLG","TTMI"
+    },
+    "ai": {
+        "PLTR","SNOW","AI","BBAI","SOUN"
+    },
+    "network": {
+        "LITE","VIAV","AAOI","HLIT","CIEN","FSLY"
+    },
+    "energy": {
+        "XOM","CVX","SLB","HAL","WULF"
+    },
+    "biotech": {
+        "MRNA","NVAX","BNTX","REGN","VRTX","ALNY",
+        "HCAI","KALV","CUE","AVTX"
+    },
+    "leveraged": {
+        "TQQQ","GGLL","AMZU","AMDL","NVDL"
+    }
 }
 
 def get_theme(ticker):
@@ -53,21 +71,29 @@ def get_theme(ticker):
 # =========================
 def load_universe():
     symbols = set()
+
     try:
         url = "https://raw.githubusercontent.com/datasets/nasdaq-listings/master/data/nasdaq-listed-symbols.csv"
         rows = requests.get(url, timeout=10).text.splitlines()[1:]
+
         for row in rows:
             s = row.split(",")[0].strip().upper()
             if re.match(r"^[A-Z]{1,6}$", s):
                 symbols.add(s)
+
     except:
         pass
 
-    fallback = ["AAPL","MSFT","NVDA","AMD","AMZN","META","GOOGL","TSLA","QCOM"]
+    fallback = [
+        "AAPL","MSFT","NVDA","AMD","AMZN",
+        "META","GOOGL","TSLA","QCOM"
+    ]
+
     symbols.update(fallback)
 
     symbols = list(symbols)
     random.shuffle(symbols)
+
     return symbols[:SCAN_SIZE]
 
 # =========================
@@ -76,162 +102,243 @@ def load_universe():
 def fetch(session, ticker):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=6mo&interval=1d"
+
         res = session.get(url, timeout=5)
+
         if res.status_code != 200:
             return None
 
         data = res.json()["chart"]["result"][0]
 
-        close = [x for x in data["indicators"]["quote"][0]["close"] if x]
-        volume = [x for x in data["indicators"]["quote"][0]["volume"] if x]
+        close = [
+            x for x in
+            data["indicators"]["quote"][0]["close"]
+            if x is not None
+        ]
 
-        if len(close) < 60:
+        volume = [
+            x for x in
+            data["indicators"]["quote"][0]["volume"]
+            if x is not None
+        ]
+
+        if len(close) < 70:
             return None
 
         price = close[-1]
+
         if price < MIN_PRICE:
             return None
 
         vol_base = np.mean(volume[-20:-5])
+
         if vol_base < MIN_VOL:
             return None
 
-        def ret(a,b): return (a/b - 1) if b else 0
+        def ret(a,b):
+            return (a/b - 1) if b else 0
 
+        # =========================
+        # STATE
+        # =========================
         m1 = ret(close[-1], close[-21])
         m3 = ret(close[-1], close[-63])
+
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
-        # PHASE
         phase = "NONE"
+
         if (0.25 < m1 < 0.7 and m3 < 0.6):
             phase = "EARLY"
+
         elif (m1 > 0.45 and m3 > 0.45):
             phase = "TRANSITION"
+
         elif (m3 > 1.0):
             phase = "CONT"
 
+        # =========================
         # BREAKOUT
-        price_jump = abs(close[-1] - close[-2]) / close[-2]
-        trend_ok = close[-1] > close[-2] > close[-3]
+        # =========================
+        day_change = ret(close[-1], close[-2])
+
+        trend_ok = (
+            close[-1] > close[-2] >
+            close[-3]
+        )
+
         breakout = (
-            ((price_jump > 0.02 and vol_ratio > 1.8) or
-             (price_jump > 0.015 and vol_ratio > 2.3))
-            and trend_ok
+            (
+                day_change > 0.025 and
+                vol_ratio > 1.8
+            )
+            or
+            (
+                day_change > 0.018 and
+                vol_ratio > 2.3
+            )
+        ) and trend_ok
+
+        # =========================
+        # STATE SCORE
+        # =========================
+        raw_state = (
+            m1 * 0.6 +
+            m3 * 0.3 +
+            vol_ratio * 0.1 +
+            breakout * 0.4
+        )
+
+        state = 8.5 * (
+            1 - np.exp(-raw_state / 8.5)
         )
 
         # =========================
-        # STATE（そのまま）
+        # REAL CHANGE
         # =========================
-        raw = m1*0.6 + m3*0.3 + vol_ratio*0.1 + breakout*0.4
-        state = 8.5 * (1 - np.exp(-raw / 8.5))
+        d1 = ret(close[-1], close[-2])   # 1d
+        d3 = ret(close[-1], close[-4])   # 3d
+        d5 = ret(close[-1], close[-6])   # 5d
+
+        vol_change = (
+            volume[-1] /
+            (volume[-2] + 1e-9)
+        )
+
+        short_change = (
+            d1 * 0.5 +
+            d3 * 0.3 +
+            d5 * 0.2
+        )
+
+        volume_accel = max(
+            vol_change - 1.0,
+            0
+        )
 
         # =========================
-        # REDIS（rawベースで保存）
+        # REDIS
         # =========================
-        delta1, delta2 = 0, 0
-        prev_phase = None
+        streak = 0
         prev_streak = 0
 
         if r:
-            p1_raw = r.get(f"r:{ticker}")
-            p2_raw = r.get(f"r2:{ticker}")
-            prev_phase = r.get(f"p:{ticker}")
+            prev_short = r.get(f"short:{ticker}")
             ps = r.get(f"streak:{ticker}")
 
             if ps:
                 prev_streak = int(ps)
 
-            if p1_raw and p2_raw:
-                p1_raw = float(p1_raw)
-                p2_raw = float(p2_raw)
-                delta1 = raw - p1_raw
-                delta2 = p1_raw - p2_raw
+            delta = 0
 
-            if p1_raw:
-                r.set(f"r2:{ticker}", p1_raw, ex=7200)
+            if prev_short:
+                delta = short_change - float(prev_short)
 
-            r.set(f"r:{ticker}", raw, ex=7200)
-            r.set(f"p:{ticker}", phase, ex=86400)
+                # =========================
+                # STREAK
+                # =========================
+                if short_change > 0.015:
+                    if delta > -0.01:
+                        streak = prev_streak + 1
+                    else:
+                        streak = prev_streak
+                else:
+                    streak = 0
+
+            r.set(
+                f"short:{ticker}",
+                short_change,
+                ex=86400
+            )
+
+            r.set(
+                f"streak:{ticker}",
+                streak,
+                ex=86400
+            )
 
         # =========================
-        # STREAK（ノイズ耐性）
+        # CHANGE SCORE
         # =========================
-        threshold = 0.01
+        change_score = (
+            short_change * 8 +
+            volume_accel * 0.35
+        )
 
-        if delta1 > threshold:
-            streak = prev_streak + 1
-        elif delta1 > -threshold:
-            streak = prev_streak
-        else:
-            streak = 0
-
-        if r:
-            r.set(f"streak:{ticker}", streak, ex=86400)
+        change_score = np.clip(
+            change_score,
+            0,
+            2.0
+        )
 
         # =========================
-        # CHANGE
+        # PHASE BOOST
         # =========================
-        up = max(delta1, 0)
-        accel = max(delta1 - delta2, 0)
-
-        price_change = up*0.6 + accel*0.8
-        vol_trend = volume[-1] > volume[-2] > volume[-3]
-        vol_change = 0.25 if vol_trend else 0
-
-        change = min(price_change + vol_change, 1.5)
-        effective_change = change * (0.3 + state * 0.4)
-
-        state_factor = 0.4 + state * 0.6
-
         phase_boost = 1.0
-        if prev_phase == "EARLY" and phase == "TRANSITION":
-            phase_boost = 1.20
-        elif phase == "TRANSITION":
-            phase_boost = 1.08
+
+        if phase == "TRANSITION":
+            phase_boost = 1.18
+
         elif phase == "EARLY":
-            phase_boost = 1.03
-        elif phase == "CONT":
             phase_boost = 1.05
 
-        base_score = state_factor * (1 + effective_change) * phase_boost
+        elif phase == "CONT":
+            phase_boost = 1.02
 
         # =========================
-        # STREAK BOOST（そのまま）
+        # STREAK BOOST
         # =========================
-        if streak == 0:
-            streak_boost = 0.85
-        else:
-            streak_boost = 1 + min(streak * 0.08, 0.6)
+        streak_boost = 1.0
 
-        if streak <= 1 and delta1 > 1.0:
-            streak_boost *= 0.7
+        if streak >= 1:
+            streak_boost += min(
+                streak * 0.12,
+                0.8
+            )
 
-        score = base_score * streak_boost
+        # =========================
+        # FINAL SCORE
+        # =========================
+        score = (
+            state *
+            (1 + change_score) *
+            phase_boost *
+            streak_boost
+        )
+
+        # 暴走防止
+        score = min(score, 8.0)
 
         return {
             "ticker": ticker,
             "phase": phase,
             "score": float(score),
-            "breakout": breakout,
+            "breakout": bool(breakout),
             "theme": get_theme(ticker),
-            "streak": streak
+            "streak": int(streak)
         }
 
     except:
         return None
 
 # =========================
-# THEME CONTROL（そのまま）
+# THEME CONTROL
 # =========================
 def apply_theme_control(df):
+
     if len(df) == 0:
         return df
 
-    top = df.sort_values("score", ascending=False).head(60)
+    top = (
+        df.sort_values(
+            "score",
+            ascending=False
+        )
+        .head(60)
+    )
 
     theme_strength = (
-        top[top["theme"] != "other"]
+        top[top.theme != "other"]
         .groupby("theme")["score"]
         .sum()
     )
@@ -240,45 +347,66 @@ def apply_theme_control(df):
         df["final_score"] = df["score"]
         return df
 
-    top_themes = theme_strength.sort_values(ascending=False).head(3).index
+    top_themes = (
+        theme_strength
+        .sort_values(ascending=False)
+        .head(3)
+        .index
+    )
 
     def adjust(row):
+
         t = row["theme"]
 
         if t == "leveraged":
-            return row["score"] * 0.5
-
-        if t not in top_themes and t != "other":
-            return row["score"] * 0.7
+            return row["score"] * 0.45
 
         if t in top_themes:
-            return row["score"] * 1.25
+            return row["score"] * 1.22
+
+        if t != "other":
+            return row["score"] * 0.72
 
         return row["score"]
 
-    df["final_score"] = df.apply(adjust, axis=1)
+    df["final_score"] = df.apply(
+        adjust,
+        axis=1
+    )
+
     return df
 
 # =========================
 # BUY
 # =========================
 def build_buy(df):
-    df = df.sort_values("final_score", ascending=False)
+
+    df = df.sort_values(
+        "final_score",
+        ascending=False
+    )
 
     result = []
     theme_used = {}
 
     for _, row in df.iterrows():
+
         t = row["theme"]
 
-        if t != "other" and theme_used.get(t, 0) >= 2:
+        if (
+            t != "other" and
+            theme_used.get(t,0) >= 2
+        ):
             continue
 
         if t == "leveraged":
             continue
 
         result.append(row)
-        theme_used[t] = theme_used.get(t, 0) + 1
+
+        theme_used[t] = (
+            theme_used.get(t,0) + 1
+        )
 
         if len(result) >= 5:
             break
@@ -289,26 +417,93 @@ def build_buy(df):
 # MESSAGE
 # =========================
 def build_msg(df, buy):
+
     msg = []
-    msg.append("🚀 GrowthRadar v39.2 (TIME FIX MODEL)")
-    msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
-    msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    msg.append(f"🟢 Redis: {'ON' if r else 'OFF'}")
+
+    msg.append(
+        "🚀 GrowthRadar v39.3 (REAL CHANGE MODEL)"
+    )
+
+    msg.append(
+        f"Scan:{SCAN_SIZE} Valid:{len(df)}"
+    )
+
+    msg.append(
+        f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    )
+
+    msg.append(
+        f"🟢 Redis: {'ON' if r else 'OFF'}"
+    )
 
     msg.append("\n💎 BUY SIGNAL")
-    msg += [f"{x.ticker} S:{x.final_score:.2f} Streak:{x.streak}" for x in buy] or ["None"]
+
+    if buy:
+        for x in buy:
+            msg.append(
+                f"{x.ticker} "
+                f"S:{x.final_score:.2f} "
+                f"Streak:{x.streak}"
+            )
+    else:
+        msg.append("None")
 
     msg.append("\n🔥 EARLY")
-    msg += [f"{r.ticker} S:{r.final_score:.2f}" for _, r in df[df.phase=='EARLY'].head(4).iterrows()] or ["None"]
+
+    early = (
+        df[df.phase=="EARLY"]
+        .sort_values(
+            "final_score",
+            ascending=False
+        )
+        .head(4)
+    )
+
+    msg += [
+        f"{r.ticker} S:{r.final_score:.2f}"
+        for _, r in early.iterrows()
+    ] or ["None"]
 
     msg.append("\n⚡ TRANSITION")
-    msg += [f"{r.ticker} S:{r.final_score:.2f}" for _, r in df[df.phase=='TRANSITION'].head(4).iterrows()] or ["None"]
+
+    trans = (
+        df[df.phase=="TRANSITION"]
+        .sort_values(
+            "final_score",
+            ascending=False
+        )
+        .head(4)
+    )
+
+    msg += [
+        f"{r.ticker} S:{r.final_score:.2f}"
+        for _, r in trans.iterrows()
+    ] or ["None"]
 
     msg.append("\n🔁 CONT")
-    msg += [f"{r.ticker} S:{r.final_score:.2f}" for _, r in df[df.phase=='CONT'].head(4).iterrows()] or ["None"]
+
+    cont = (
+        df[df.phase=="CONT"]
+        .sort_values(
+            "final_score",
+            ascending=False
+        )
+        .head(4)
+    )
+
+    msg += [
+        f"{r.ticker} S:{r.final_score:.2f}"
+        for _, r in cont.iterrows()
+    ] or ["None"]
 
     msg.append("\n🧨 BREAKOUT (event)")
-    msg += [r.ticker for _, r in df[df.breakout].head(4).iterrows()] or ["None"]
+
+    brk = df[df.breakout].head(4)
+
+    msg += [
+        r.ticker
+        for _, r in brk.iterrows()
+    ] or ["None"]
 
     return "\n".join(msg)
 
@@ -316,18 +511,29 @@ def build_msg(df, buy):
 # RUN
 # =========================
 def run():
+
     session = requests.Session()
     session.headers.update(HEADERS)
 
     universe = load_universe()
+
     results = []
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = {ex.submit(fetch, session, t): t for t in universe}
+    with ThreadPoolExecutor(
+        max_workers=MAX_WORKERS
+    ) as ex:
+
+        futures = {
+            ex.submit(fetch, session, t): t
+            for t in universe
+        }
+
         for f in as_completed(futures):
-            x = f.result()
-            if x:
-                results.append(x)
+
+            rlt = f.result()
+
+            if rlt:
+                results.append(rlt)
 
     if not results:
         print("NO DATA")
@@ -336,13 +542,18 @@ def run():
     df = pd.DataFrame(results)
 
     df = apply_theme_control(df)
+
     buy = build_buy(df)
 
     text = build_msg(df, buy)
+
     print(text)
 
     if WEBHOOK_URL:
-        requests.post(WEBHOOK_URL, json={"content": text[:1900]})
+        requests.post(
+            WEBHOOK_URL,
+            json={"content": text[:1900]}
+        )
 
 if __name__ == "__main__":
     run()
