@@ -186,6 +186,10 @@ def fetch(session, ticker):
         ):
             phase = "CONT"
 
+        active = (
+            phase != "NONE"
+        )
+
         # =====================================
         # BREAKOUT
         # =====================================
@@ -248,8 +252,8 @@ def fetch(session, ticker):
                     float(prev_score)
                 )
 
-            prev_phase = r.get(
-                f"phase:{ticker}"
+            prev_active = (
+                r.get(f"active:{ticker}") == "1"
             )
 
             prev_streak = int(
@@ -257,12 +261,9 @@ def fetch(session, ticker):
             )
 
             # =====================================
-            # FIXED STREAK LOGIC
+            # ACTIVE STREAK
             # =====================================
-            if (
-                prev_phase == phase and
-                phase != "NONE"
-            ):
+            if prev_active and active:
                 streak = prev_streak + 1
             else:
                 streak = 0
@@ -274,8 +275,8 @@ def fetch(session, ticker):
             )
 
             r.set(
-                f"phase:{ticker}",
-                phase,
+                f"active:{ticker}",
+                "1" if active else "0",
                 ex=86400
             )
 
@@ -304,7 +305,7 @@ def fetch(session, ticker):
         # =====================================
         streak_bonus = min(
             streak * 0.18,
-            1.2
+            1.5
         )
 
         # =====================================
@@ -349,8 +350,8 @@ def build_message(df):
     lines = []
 
     lines.append(
-        "🚀 GrowthRadar v40.1 "
-        "(EXTENSION FIXED)"
+        "🚀 GrowthRadar v40.2 "
+        "(ACTIVE STREAK MODEL)"
     )
 
     lines.append(
@@ -370,7 +371,7 @@ def build_message(df):
     lines.append("")
 
     # =====================================
-    # BUY
+    # BUY SIGNAL
     # =====================================
     lines.append("💎 BUY SIGNAL")
 
@@ -478,7 +479,14 @@ def build_message(df):
     lines.append("")
     lines.append("🧨 BREAKOUT (event)")
 
-    brk = df[df.breakout].head(4)
+    brk = (
+        df[df.breakout]
+        .sort_values(
+            "score",
+            ascending=False
+        )
+        .head(4)
+    )
 
     if len(brk):
 
