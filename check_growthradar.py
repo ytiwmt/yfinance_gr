@@ -1,14 +1,13 @@
-```python
 import os
 import requests
 import random
 import re
+import redis
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import numpy as np
-import redis
 
 # =========================
 # CONFIG
@@ -22,7 +21,9 @@ MAX_WORKERS = 12
 MIN_PRICE = 5.0
 MIN_VOL = 300000
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
 
 # =========================
 # REDIS
@@ -33,10 +34,12 @@ if REDIS_URL:
     try:
         r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
         r.ping()
-        print("🟢 Redis Connected")
+        print("🟢 Redis: CONNECTED")
     except:
-        print("🔴 Redis Failed")
+        print("🔴 Redis: FAILED")
         r = None
+else:
+    print("⚠️ Redis: OFF")
 
 # =========================
 # UNIVERSE
@@ -60,8 +63,7 @@ def load_universe():
 
     fallback = [
         "AAPL","MSFT","NVDA","AMD","AMZN","META","GOOGL","TSLA",
-        "PLTR","SMCI","AVGO","TSM","ASML","MU","CRWD","SNOW",
-        "QCOM","MRVL","ARM","INTC"
+        "INTC","QCOM","AVGO","TSM","ASML","MU","PLTR","SNOW","CRWD"
     ]
 
     symbols.update(fallback)
@@ -75,7 +77,6 @@ def load_universe():
 # FETCH
 # =========================
 def fetch(session, ticker):
-
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=6mo&interval=1d"
 
@@ -124,13 +125,13 @@ def fetch(session, ticker):
         # =========================
         phase = "NONE"
 
-        if 0.25 < m1 < 0.7 and m3 < 0.6:
+        if (0.25 < m1 < 0.7 and m3 < 0.6):
             phase = "EARLY"
 
-        elif m1 > 0.45 and m3 > 0.45:
+        elif (m1 > 0.45 and m3 > 0.45):
             phase = "TRANSITION"
 
-        elif m3 > 1.0:
+        elif (m3 > 1.0):
             phase = "CONT"
 
         # =========================
@@ -139,8 +140,7 @@ def fetch(session, ticker):
         price_jump = abs(close[-1] - close[-2]) / close[-2]
 
         trend_ok = (
-            close[-1] > close[-2] >
-            close[-3]
+            close[-1] > close[-2] > close[-3]
         )
 
         breakout = (
@@ -161,8 +161,8 @@ def fetch(session, ticker):
         ma20 = np.mean(close[-20:])
 
         extension = (
-            close[-1] / (ma20 + 1e-9)
-        )
+            (close[-1] / (ma20 + 1e-9)) - 1
+        ) * 10
 
         # =========================
         # BASE SCORE
@@ -175,19 +175,7 @@ def fetch(session, ticker):
         )
 
         # =========================
-        # OVERHEAT CONTROL
-        # =========================
-        if extension > 3.5:
-            base_score *= 0.55
-
-        elif extension > 3.0:
-            base_score *= 0.70
-
-        elif extension > 2.5:
-            base_score *= 0.82
-
-        # =========================
-        # REDIS
+        # REDIS TIME MODEL
         # =========================
         delta = 0.0
         streak = 0
@@ -195,7 +183,6 @@ def fetch(session, ticker):
         today = datetime.utcnow().strftime("%Y-%m-%d")
 
         if r:
-
             prev_score = r.get(f"score:{ticker}")
             prev_streak = r.get(f"streak:{ticker}")
             prev_day = r.get(f"day:{ticker}")
@@ -209,15 +196,12 @@ def fetch(session, ticker):
             # =========================
             # STREAK FIX
             # =========================
-            # 同日中は維持
-            # 営業日更新時のみ判定
-            # =========================
             if prev_day != today:
 
                 keep_signal = (
-                    phase in ["TRANSITION", "CONT"]
-                    and score_safe(base_score)
-                    and delta >= -0.15
+                    phase in ["TRANSITION", "CONT"] and
+                    base_score > 0.9 and
+                    delta >= -0.15
                 )
 
                 if keep_signal:
@@ -225,32 +209,26 @@ def fetch(session, ticker):
                 else:
                     streak = 0
 
-            # 保存
-            r.set(
-                f"score:{ticker}",
-                base_score,
-                ex=86400
-            )
-
-            r.set(
-                f"streak:{ticker}",
-                streak,
-                ex=86400 * 7
-            )
-
-            r.set(
-                f"day:{ticker}",
-                today,
-                ex=86400 * 7
-            )
+            # SAVE
+            r.set(f"score:{ticker}", base_score, ex=86400)
+            r.set(f"streak:{ticker}", streak, ex=86400 * 7)
+            r.set(f"day:{ticker}", today, ex=86400 * 7)
 
         # =========================
         # STREAK BONUS
         # =========================
-        streak_bonus = min(
-            streak * 0.18,
-            0.9
-        )
+        streak_bonus = min(streak * 0.18, 0.9)
+
+        # =========================
+        # EXTENSION PENALTY
+        # =========================
+        ext_penalty = 0.0
+
+        if extension > 3.5:
+            ext_penalty = 1.0
+
+        elif extension > 2.5:
+            ext_penalty = 0.5
 
         # =========================
         # FINAL SCORE
@@ -258,13 +236,16 @@ def fetch(session, ticker):
         score = (
             base_score +
             max(delta, 0) * 0.45 +
-            streak_bonus
+            streak_bonus -
+            ext_penalty
         )
+
+        score = round(float(score), 2)
 
         return {
             "ticker": ticker,
             "phase": phase,
-            "score": round(float(score), 2),
+            "score": score,
             "streak": int(streak),
             "breakout": bool(breakout),
             "ext": round(float(extension), 2)
@@ -274,123 +255,116 @@ def fetch(session, ticker):
         return None
 
 # =========================
-# SAFE SCORE CHECK
+# BUY
 # =========================
-def score_safe(x):
-    return x >= 1.0
+def build_buy(df):
+    buy = df.copy()
+
+    structure_bonus = (
+        (buy["phase"] == "TRANSITION") * 0.7 +
+        (buy["phase"] == "CONT") * 0.45 +
+        (buy["phase"] == "EARLY") * 0.15
+    )
+
+    streak_bonus = np.minimum(
+        buy["streak"] * 0.12,
+        0.8
+    )
+
+    ext_penalty = np.maximum(
+        buy["ext"] - 2.5,
+        0
+    ) * 0.35
+
+    buy["buy_score"] = (
+        buy["score"] +
+        structure_bonus +
+        streak_bonus -
+        ext_penalty
+    )
+
+    buy = buy.sort_values(
+        "buy_score",
+        ascending=False
+    )
+
+    return buy.head(5)
 
 # =========================
-# DISCORD
+# MESSAGE
 # =========================
 def build_message(df):
+    buy = build_buy(df)
 
     msg = []
 
-    msg.append("🚀 GrowthRadar v40.3 (ACTIVE STREAK FIX)")
+    msg.append("🚀 GrowthRadar v40.3 (ACTIVE STREAK FIX MODEL)")
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    msg.append(f"🟢 Redis: {'ON' if r else 'OFF'}")
+    msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
 
     msg.append("")
-
-    # =========================
-    # BUY
-    # =========================
     msg.append("💎 BUY SIGNAL")
 
-    buy = (
-        df.sort_values(
-            "score",
-            ascending=False
-        )
-        .head(5)
-    )
-
     for _, row in buy.iterrows():
-
         msg.append(
             f"{row.ticker} "
-            f"S:{row.score:.2f} "
+            f"S:{row.buy_score:.2f} "
             f"Streak:{row.streak} "
             f"Ext:{row.ext:.2f}"
         )
 
-    # =========================
-    # EARLY
-    # =========================
     msg.append("")
     msg.append("🔥 EARLY")
 
     early = (
-        df[df.phase=="EARLY"]
+        df[df.phase == "EARLY"]
         .sort_values("score", ascending=False)
         .head(4)
     )
 
-    if len(early) > 0:
+    if len(early):
         for _, row in early.iterrows():
-            msg.append(
-                f"{row.ticker} "
-                f"S:{row.score:.2f}"
-            )
+            msg.append(f"{row.ticker} S:{row.score:.2f}")
     else:
         msg.append("None")
 
-    # =========================
-    # TRANSITION
-    # =========================
     msg.append("")
     msg.append("⚡ TRANSITION")
 
     trans = (
-        df[df.phase=="TRANSITION"]
+        df[df.phase == "TRANSITION"]
         .sort_values("score", ascending=False)
         .head(4)
     )
 
-    if len(trans) > 0:
+    if len(trans):
         for _, row in trans.iterrows():
-            msg.append(
-                f"{row.ticker} "
-                f"S:{row.score:.2f}"
-            )
+            msg.append(f"{row.ticker} S:{row.score:.2f}")
     else:
         msg.append("None")
 
-    # =========================
-    # CONT
-    # =========================
     msg.append("")
     msg.append("🔁 CONT")
 
     cont = (
-        df[df.phase=="CONT"]
+        df[df.phase == "CONT"]
         .sort_values("score", ascending=False)
         .head(4)
     )
 
-    if len(cont) > 0:
+    if len(cont):
         for _, row in cont.iterrows():
-            msg.append(
-                f"{row.ticker} "
-                f"S:{row.score:.2f}"
-            )
+            msg.append(f"{row.ticker} S:{row.score:.2f}")
     else:
         msg.append("None")
 
-    # =========================
-    # BREAKOUT
-    # =========================
     msg.append("")
     msg.append("🧨 BREAKOUT (event)")
 
-    brk = (
-        df[df.breakout]
-        .sort_values("score", ascending=False)
-        .head(4)
-    )
+    brk = df[df.breakout].head(4)
 
-    if len(brk) > 0:
+    if len(brk):
         for _, row in brk.iterrows():
             msg.append(row.ticker)
     else:
@@ -402,7 +376,6 @@ def build_message(df):
 # RUN
 # =========================
 def run():
-
     session = requests.Session()
     session.headers.update(HEADERS)
 
@@ -410,17 +383,13 @@ def run():
 
     results = []
 
-    with ThreadPoolExecutor(
-        max_workers=MAX_WORKERS
-    ) as ex:
-
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {
             ex.submit(fetch, session, t): t
             for t in universe
         }
 
         for f in as_completed(futures):
-
             rlt = f.result()
 
             if rlt:
@@ -447,4 +416,3 @@ def run():
 # =========================
 if __name__ == "__main__":
     run()
-```
