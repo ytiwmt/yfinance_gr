@@ -1,3 +1,4 @@
+```python
 import os
 import requests
 import random
@@ -9,9 +10,9 @@ import pandas as pd
 import numpy as np
 import redis
 
-# =====================================
+# =========================
 # CONFIG
-# =====================================
+# =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
 REDIS_URL = os.environ.get("REDIS_URL")
 
@@ -21,46 +22,34 @@ MAX_WORKERS = 12
 MIN_PRICE = 5.0
 MIN_VOL = 300000
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# =====================================
+# =========================
 # REDIS
-# =====================================
+# =========================
 r = None
 
 if REDIS_URL:
     try:
-        r = redis.Redis.from_url(
-            REDIS_URL,
-            decode_responses=True
-        )
+        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
         r.ping()
+        print("🟢 Redis Connected")
     except:
+        print("🔴 Redis Failed")
         r = None
 
-# =====================================
+# =========================
 # UNIVERSE
-# =====================================
+# =========================
 def load_universe():
-
     symbols = set()
 
     try:
-        url = (
-            "https://raw.githubusercontent.com/"
-            "datasets/nasdaq-listings/master/data/"
-            "nasdaq-listed-symbols.csv"
-        )
+        url = "https://raw.githubusercontent.com/datasets/nasdaq-listings/master/data/nasdaq-listed-symbols.csv"
 
-        data = requests.get(
-            url,
-            timeout=10
-        ).text.splitlines()[1:]
+        data = requests.get(url, timeout=10).text.splitlines()[1:]
 
         for line in data:
-
             s = line.split(",")[0].strip().upper()
 
             if re.match(r"^[A-Z]{1,6}$", s):
@@ -70,36 +59,27 @@ def load_universe():
         pass
 
     fallback = [
-        "AAPL","MSFT","NVDA","AMD","AMZN","META",
-        "GOOGL","TSLA","PLTR","AVGO","MU","QCOM",
-        "TSM","ASML","ARM","CRWD","SNOW","SMCI"
+        "AAPL","MSFT","NVDA","AMD","AMZN","META","GOOGL","TSLA",
+        "PLTR","SMCI","AVGO","TSM","ASML","MU","CRWD","SNOW",
+        "QCOM","MRVL","ARM","INTC"
     ]
 
     symbols.update(fallback)
 
     symbols = list(symbols)
-
     random.shuffle(symbols)
 
     return symbols[:SCAN_SIZE]
 
-# =====================================
+# =========================
 # FETCH
-# =====================================
+# =========================
 def fetch(session, ticker):
 
     try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=6mo&interval=1d"
 
-        url = (
-            "https://query1.finance.yahoo.com/v8/"
-            f"finance/chart/{ticker}"
-            "?range=6mo&interval=1d"
-        )
-
-        res = session.get(
-            url,
-            timeout=5
-        )
+        res = session.get(url, timeout=5)
 
         if res.status_code != 200:
             return None
@@ -112,7 +92,7 @@ def fetch(session, ticker):
         close = [x for x in close if x is not None]
         volume = [x for x in volume if x is not None]
 
-        if len(close) < 80:
+        if len(close) < 70:
             return None
 
         price = close[-1]
@@ -122,85 +102,44 @@ def fetch(session, ticker):
 
         vol_base = np.mean(volume[-20:-5])
 
-        if np.isnan(vol_base):
-            return None
-
-        if vol_base <= 0:
+        if np.isnan(vol_base) or vol_base <= 0:
             return None
 
         if vol_base < MIN_VOL:
             return None
 
-        # =====================================
+        # =========================
         # RETURNS
-        # =====================================
+        # =========================
         def ret(a, b):
             return (a / b - 1) if b else 0
 
         m1 = ret(close[-1], close[-21])
         m3 = ret(close[-1], close[-63])
 
-        vol_ratio = (
-            volume[-1] /
-            (vol_base + 1e-9)
-        )
+        vol_ratio = volume[-1] / (vol_base + 1e-9)
 
-        # =====================================
-        # EXTENSION
-        # =====================================
-        ext_60 = (
-            close[-1] /
-            (min(close[-60:]) + 1e-9)
-        )
-
-        ext_penalty = 0.0
-
-        if ext_60 > 5.0:
-            ext_penalty = 1.3
-
-        elif ext_60 > 3.5:
-            ext_penalty = 0.8
-
-        elif ext_60 > 2.5:
-            ext_penalty = 0.35
-
-        # =====================================
+        # =========================
         # PHASE
-        # =====================================
+        # =========================
         phase = "NONE"
 
-        if (
-            0.25 < m1 < 0.7 and
-            m3 < 0.6
-        ):
+        if 0.25 < m1 < 0.7 and m3 < 0.6:
             phase = "EARLY"
 
-        elif (
-            m1 > 0.45 and
-            m3 > 0.45
-        ):
+        elif m1 > 0.45 and m3 > 0.45:
             phase = "TRANSITION"
 
-        elif (
-            m3 > 1.0
-        ):
+        elif m3 > 1.0:
             phase = "CONT"
 
-        active = (
-            phase != "NONE"
-        )
-
-        # =====================================
+        # =========================
         # BREAKOUT
-        # =====================================
-        price_jump = (
-            abs(close[-1] - close[-2]) /
-            close[-2]
-        )
+        # =========================
+        price_jump = abs(close[-1] - close[-2]) / close[-2]
 
         trend_ok = (
-            close[-1] >
-            close[-2] >
+            close[-1] > close[-2] >
             close[-3]
         )
 
@@ -216,58 +155,77 @@ def fetch(session, ticker):
             )
         ) and trend_ok
 
-        # =====================================
-        # RAW SCORE
-        # =====================================
-        raw_score = (
+        # =========================
+        # EXTENSION
+        # =========================
+        ma20 = np.mean(close[-20:])
+
+        extension = (
+            close[-1] / (ma20 + 1e-9)
+        )
+
+        # =========================
+        # BASE SCORE
+        # =========================
+        base_score = (
             m1 * 0.55 +
             m3 * 0.25 +
             vol_ratio * 0.10 +
             breakout * 0.35
         )
 
-        # =====================================
-        # COMPRESSION
-        # =====================================
-        base_score = (
-            7.5 *
-            (1 - np.exp(-raw_score / 7.5))
-        )
+        # =========================
+        # OVERHEAT CONTROL
+        # =========================
+        if extension > 3.5:
+            base_score *= 0.55
 
-        # =====================================
+        elif extension > 3.0:
+            base_score *= 0.70
+
+        elif extension > 2.5:
+            base_score *= 0.82
+
+        # =========================
         # REDIS
-        # =====================================
+        # =========================
         delta = 0.0
         streak = 0
 
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+
         if r:
 
-            prev_score = r.get(
-                f"score:{ticker}"
-            )
+            prev_score = r.get(f"score:{ticker}")
+            prev_streak = r.get(f"streak:{ticker}")
+            prev_day = r.get(f"day:{ticker}")
 
             if prev_score is not None:
-                delta = (
-                    base_score -
-                    float(prev_score)
+                delta = base_score - float(prev_score)
+
+            if prev_streak is not None:
+                streak = int(prev_streak)
+
+            # =========================
+            # STREAK FIX
+            # =========================
+            # 同日中は維持
+            # 営業日更新時のみ判定
+            # =========================
+            if prev_day != today:
+
+                keep_signal = (
+                    phase in ["TRANSITION", "CONT"]
+                    and score_safe(base_score)
+                    and delta >= -0.15
                 )
 
-            prev_active = (
-                r.get(f"active:{ticker}") == "1"
-            )
+                if keep_signal:
+                    streak += 1
+                else:
+                    streak = 0
 
-            prev_streak = int(
-                r.get(f"streak:{ticker}") or 0
-            )
-
-            # =====================================
-            # ACTIVE STREAK
-            # =====================================
-            if prev_active and active:
-                streak = prev_streak + 1
-            else:
-                streak = 0
-
+            # 保存
             r.set(
                 f"score:{ticker}",
                 base_score,
@@ -275,56 +233,33 @@ def fetch(session, ticker):
             )
 
             r.set(
-                f"active:{ticker}",
-                "1" if active else "0",
-                ex=86400
+                f"streak:{ticker}",
+                streak,
+                ex=86400 * 7
             )
 
             r.set(
-                f"streak:{ticker}",
-                streak,
-                ex=86400
+                f"day:{ticker}",
+                today,
+                ex=86400 * 7
             )
 
-        # =====================================
-        # PHASE BONUS
-        # =====================================
-        phase_bonus = 0.0
-
-        if phase == "EARLY":
-            phase_bonus = 0.15
-
-        elif phase == "TRANSITION":
-            phase_bonus = 0.55
-
-        elif phase == "CONT":
-            phase_bonus = 0.30
-
-        # =====================================
+        # =========================
         # STREAK BONUS
-        # =====================================
+        # =========================
         streak_bonus = min(
             streak * 0.18,
-            1.5
+            0.9
         )
 
-        # =====================================
-        # DELTA BONUS
-        # =====================================
-        delta_bonus = max(delta, 0) * 2.0
-
-        # =====================================
+        # =========================
         # FINAL SCORE
-        # =====================================
+        # =========================
         score = (
             base_score +
-            phase_bonus +
-            streak_bonus +
-            delta_bonus -
-            ext_penalty
+            max(delta, 0) * 0.45 +
+            streak_bonus
         )
-
-        score = max(score, 0)
 
         return {
             "ticker": ticker,
@@ -332,48 +267,36 @@ def fetch(session, ticker):
             "score": round(float(score), 2),
             "streak": int(streak),
             "breakout": bool(breakout),
-            "ext": round(float(ext_60), 2)
+            "ext": round(float(extension), 2)
         }
 
     except:
         return None
 
-# =====================================
-# MESSAGE
-# =====================================
+# =========================
+# SAFE SCORE CHECK
+# =========================
+def score_safe(x):
+    return x >= 1.0
+
+# =========================
+# DISCORD
+# =========================
 def build_message(df):
 
-    now = datetime.now().strftime(
-        "%Y-%m-%d %H:%M"
-    )
+    msg = []
 
-    lines = []
+    msg.append("🚀 GrowthRadar v40.3 (ACTIVE STREAK FIX)")
+    msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
+    msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    msg.append(f"🟢 Redis: {'ON' if r else 'OFF'}")
 
-    lines.append(
-        "🚀 GrowthRadar v40.2 "
-        "(ACTIVE STREAK MODEL)"
-    )
+    msg.append("")
 
-    lines.append(
-        f"Scan:{SCAN_SIZE} "
-        f"Valid:{len(df)}"
-    )
-
-    lines.append(
-        f"Time:{now}"
-    )
-
-    lines.append(
-        f"🟢 Redis: "
-        f"{'ON' if r else 'OFF'}"
-    )
-
-    lines.append("")
-
-    # =====================================
-    # BUY SIGNAL
-    # =====================================
-    lines.append("💎 BUY SIGNAL")
+    # =========================
+    # BUY
+    # =========================
+    msg.append("💎 BUY SIGNAL")
 
     buy = (
         df.sort_values(
@@ -385,129 +308,103 @@ def build_message(df):
 
     for _, row in buy.iterrows():
 
-        lines.append(
+        msg.append(
             f"{row.ticker} "
             f"S:{row.score:.2f} "
             f"Streak:{row.streak} "
-            f"Ext:{row.ext}"
+            f"Ext:{row.ext:.2f}"
         )
 
-    # =====================================
+    # =========================
     # EARLY
-    # =====================================
-    lines.append("")
-    lines.append("🔥 EARLY")
+    # =========================
+    msg.append("")
+    msg.append("🔥 EARLY")
 
     early = (
-        df[df.phase == "EARLY"]
-        .sort_values(
-            "score",
-            ascending=False
-        )
+        df[df.phase=="EARLY"]
+        .sort_values("score", ascending=False)
         .head(4)
     )
 
-    if len(early):
-
+    if len(early) > 0:
         for _, row in early.iterrows():
-
-            lines.append(
+            msg.append(
                 f"{row.ticker} "
                 f"S:{row.score:.2f}"
             )
-
     else:
-        lines.append("None")
+        msg.append("None")
 
-    # =====================================
+    # =========================
     # TRANSITION
-    # =====================================
-    lines.append("")
-    lines.append("⚡ TRANSITION")
+    # =========================
+    msg.append("")
+    msg.append("⚡ TRANSITION")
 
     trans = (
-        df[df.phase == "TRANSITION"]
-        .sort_values(
-            "score",
-            ascending=False
-        )
+        df[df.phase=="TRANSITION"]
+        .sort_values("score", ascending=False)
         .head(4)
     )
 
-    if len(trans):
-
+    if len(trans) > 0:
         for _, row in trans.iterrows():
-
-            lines.append(
+            msg.append(
                 f"{row.ticker} "
                 f"S:{row.score:.2f}"
             )
-
     else:
-        lines.append("None")
+        msg.append("None")
 
-    # =====================================
+    # =========================
     # CONT
-    # =====================================
-    lines.append("")
-    lines.append("🔁 CONT")
+    # =========================
+    msg.append("")
+    msg.append("🔁 CONT")
 
     cont = (
-        df[df.phase == "CONT"]
-        .sort_values(
-            "score",
-            ascending=False
-        )
+        df[df.phase=="CONT"]
+        .sort_values("score", ascending=False)
         .head(4)
     )
 
-    if len(cont):
-
+    if len(cont) > 0:
         for _, row in cont.iterrows():
-
-            lines.append(
+            msg.append(
                 f"{row.ticker} "
                 f"S:{row.score:.2f}"
             )
-
     else:
-        lines.append("None")
+        msg.append("None")
 
-    # =====================================
+    # =========================
     # BREAKOUT
-    # =====================================
-    lines.append("")
-    lines.append("🧨 BREAKOUT (event)")
+    # =========================
+    msg.append("")
+    msg.append("🧨 BREAKOUT (event)")
 
     brk = (
         df[df.breakout]
-        .sort_values(
-            "score",
-            ascending=False
-        )
+        .sort_values("score", ascending=False)
         .head(4)
     )
 
-    if len(brk):
-
+    if len(brk) > 0:
         for _, row in brk.iterrows():
-            lines.append(row.ticker)
-
+            msg.append(row.ticker)
     else:
-        lines.append("None")
+        msg.append("None")
 
-    return "\n".join(lines)
+    return "\n".join(msg)
 
-# =====================================
+# =========================
 # RUN
-# =====================================
+# =========================
 def run():
 
     session = requests.Session()
-
-    session.headers.update(
-        HEADERS
-    )
+    session.headers.update(HEADERS)
 
     universe = load_universe()
 
@@ -518,11 +415,7 @@ def run():
     ) as ex:
 
         futures = {
-            ex.submit(
-                fetch,
-                session,
-                t
-            ): t
+            ex.submit(fetch, session, t): t
             for t in universe
         }
 
@@ -544,16 +437,14 @@ def run():
     print(text)
 
     if WEBHOOK_URL:
-
         requests.post(
             WEBHOOK_URL,
-            json={
-                "content": text[:1900]
-            }
+            json={"content": text[:1900]}
         )
 
-# =====================================
+# =========================
 # MAIN
-# =====================================
+# =========================
 if __name__ == "__main__":
     run()
+```
