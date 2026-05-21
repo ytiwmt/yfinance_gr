@@ -1,499 +1,495 @@
 import os
-import time
-import json
-import redis
 import requests
-import yfinance as yf
-import pandas as pd
+import random
+import re
+import redis
 from datetime import datetime
-from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import pandas as pd
+import numpy as np
 
 # =========================
 # CONFIG
 # =========================
-
-VERSION = "v40.4 (SECOND WIND MODEL)"
-
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-REDIS_URL = os.getenv("REDIS_URL")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
+REDIS_URL = os.environ.get("REDIS_URL")
 
 SCAN_SIZE = 1500
+MAX_WORKERS = 12
+
+MIN_PRICE = 5.0
+MIN_VOL = 300000
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
 
 # =========================
 # REDIS
 # =========================
-
 r = None
 
-try:
-    r = redis.from_url(REDIS_URL)
-    r.ping()
-    redis_ok = True
-except:
-    redis_ok = False
-
-# =========================
-# LOAD SYMBOLS
-# =========================
-
-url = "https://raw.githubusercontent.com/datasets/nasdaq-listings/master/data/nasdaq-listed-symbols.csv"
-df = pd.read_csv(url)
-
-symbols = (
-    df["Symbol"]
-    .dropna()
-    .astype(str)
-    .tolist()
-)
-
-symbols = [
-    s for s in symbols
-    if len(s) <= 5
-    and "^" not in s
-    and "/" not in s
-]
-
-symbols = symbols[:SCAN_SIZE]
-
-# =========================
-# HELPERS
-# =========================
-
-def get_float(x, default=0):
+if REDIS_URL:
     try:
-        if pd.isna(x):
-            return default
-        return float(x)
+        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        r.ping()
+        print("🟢 Redis: CONNECTED")
     except:
-        return default
+        print("🔴 Redis: FAILED")
+        r = None
+else:
+    print("⚠️ Redis: OFF")
 
-
-def load_json(key, default):
-    if not redis_ok:
-        return default
-
-    raw = r.get(key)
-
-    if not raw:
-        return default
+# =========================
+# UNIVERSE
+# =========================
+def load_universe():
+    symbols = set()
 
     try:
-        return json.loads(raw)
+        url = "https://raw.githubusercontent.com/datasets/nasdaq-listings/master/data/nasdaq-listed-symbols.csv"
+
+        data = requests.get(url, timeout=10).text.splitlines()[1:]
+
+        for line in data:
+            s = line.split(",")[0].strip().upper()
+
+            if re.match(r"^[A-Z]{1,6}$", s):
+                symbols.add(s)
+
     except:
-        return default
+        pass
 
+    fallback = [
+        "AAPL","MSFT","NVDA","AMD","AMZN","META","GOOGL","TSLA",
+        "INTC","QCOM","AVGO","TSM","ASML","MU","PLTR","SNOW","CRWD"
+    ]
 
-def save_json(key, value):
-    if not redis_ok:
-        return
+    symbols.update(fallback)
 
-    r.set(key, json.dumps(value))
+    symbols = list(symbols)
+    random.shuffle(symbols)
 
-
-# =========================
-# STATE
-# =========================
-
-prev_scores = load_json("gr_prev_scores", {})
-streak_map = load_json("gr_streak_map", {})
-theme_map = load_json("gr_theme_map", {})
-high_streak_map = load_json("gr_high_streak_map", {})
+    return symbols[:SCAN_SIZE]
 
 # =========================
-# RESULTS
+# FETCH
 # =========================
-
-buy_signal = []
-early_signal = []
-transition_signal = []
-cont_signal = []
-breakout_signal = []
-second_wind_signal = []
-
-valid_count = 0
-
-# =========================
-# DOWNLOAD
-# =========================
-
-data = yf.download(
-    tickers=symbols,
-    period="3mo",
-    interval="1d",
-    group_by="ticker",
-    auto_adjust=True,
-    progress=False,
-    threads=True
-)
-
-# =========================
-# MAIN LOOP
-# =========================
-
-for symbol in symbols:
-
+def fetch(session, ticker):
     try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=6mo&interval=1d"
 
-        if symbol not in data:
-            continue
+        res = session.get(url, timeout=5)
 
-        d = data[symbol].dropna()
+        if res.status_code != 200:
+            return None
 
-        if len(d) < 30:
-            continue
+        data = res.json()["chart"]["result"][0]
 
-        close = d["Close"]
-        volume = d["Volume"]
+        close = data["indicators"]["quote"][0]["close"]
+        volume = data["indicators"]["quote"][0]["volume"]
 
-        c = get_float(close.iloc[-1])
-        prev_c = get_float(close.iloc[-2])
+        close = [x for x in close if x is not None]
+        volume = [x for x in volume if x is not None]
 
-        v = get_float(volume.iloc[-1])
-        vma20 = get_float(volume.tail(20).mean())
+        if len(close) < 70:
+            return None
 
-        if c <= 1:
-            continue
+        price = close[-1]
 
-        if vma20 <= 100000:
-            continue
+        if price < MIN_PRICE:
+            return None
 
-        valid_count += 1
+        vol_base = np.mean(volume[-20:-5])
 
-        # =========================
-        # PRICE / VOLUME
-        # =========================
+        if np.isnan(vol_base) or vol_base <= 0:
+            return None
 
-        ret1 = (c / prev_c) - 1
-
-        ma10 = close.tail(10).mean()
-        ma20 = close.tail(20).mean()
-
-        ext = ((c / ma20) - 1) * 10
-
-        vol_ratio = v / vma20 if vma20 > 0 else 0
+        if vol_base < MIN_VOL:
+            return None
 
         # =========================
-        # SCORE
+        # RETURNS
         # =========================
+        def ret(a, b):
+            return (a / b - 1) if b else 0
 
-        score = 0
+        m1 = ret(close[-1], close[-21])
+        m3 = ret(close[-1], close[-63])
 
-        score += ret1 * 8
-        score += max(vol_ratio - 1, 0) * 0.8
-
-        if ma10 > ma20:
-            score += 0.5
-
-        if ext > 0:
-            score += min(ext, 3) * 0.5
+        vol_ratio = volume[-1] / (vol_base + 1e-9)
 
         # =========================
-        # PREV SCORE
+        # PHASE
         # =========================
+        phase = "NONE"
 
-        prev_score = prev_scores.get(symbol, 0)
+        if (0.25 < m1 < 0.7 and m3 < 0.6):
+            phase = "EARLY"
 
-        delta = score - prev_score
+        elif (m1 > 0.45 and m3 > 0.45):
+            phase = "TRANSITION"
 
-        # =========================
-        # STREAK
-        # =========================
-
-        streak = streak_map.get(symbol, 0)
-
-        if score > 1:
-            streak += 1
-        else:
-            streak = 0
-
-        streak_map[symbol] = streak
-
-        # =========================
-        # HIGH STREAK MEMORY
-        # =========================
-
-        prev_high = high_streak_map.get(symbol, 0)
-
-        if streak > prev_high:
-            high_streak_map[symbol] = streak
-
-        recent_high_streak = high_streak_map.get(symbol, 0)
-
-        # =========================
-        # THEME
-        # =========================
-
-        theme_map[symbol] = theme_map.get(symbol, 0) * 0.95
-
-        if score > 1:
-            theme_map[symbol] += 1
-
-        theme_strength = theme_map[symbol]
-
-        # =========================
-        # BUY SIGNAL
-        # =========================
-
-        if (
-            score > 0.6
-            and delta > 0
-        ):
-            buy_signal.append(
-                (
-                    symbol,
-                    round(score, 2),
-                    streak,
-                    round(ext, 2)
-                )
-            )
-
-        # =========================
-        # EARLY
-        # =========================
-
-        if (
-            0.25 < score < 0.6
-            and delta > 0
-        ):
-            early_signal.append(
-                (
-                    symbol,
-                    round(score, 2)
-                )
-            )
-
-        # =========================
-        # TRANSITION
-        # =========================
-
-        if (
-            delta > 0.5
-            and score > 0.15
-        ):
-            transition_signal.append(
-                (
-                    symbol,
-                    round(delta, 2)
-                )
-            )
-
-        # =========================
-        # CONT
-        # =========================
-
-        if (
-            streak >= 2
-            and score > 0.3
-        ):
-            cont_signal.append(
-                (
-                    symbol,
-                    round(score, 2)
-                )
-            )
-
-        # =========================
-        # SECOND WIND
-        # =========================
-
-        recovering = (
-            score > prev_score
-            and delta > 0.25
-        )
-
-        second_wind = (
-            recent_high_streak >= 4
-            and streak == 0
-            and ext < 1
-            and recovering
-            and score > 0.4
-        )
-
-        if second_wind:
-            second_wind_signal.append(
-                (
-                    symbol,
-                    round(score, 2),
-                    round(ext, 2),
-                    recent_high_streak
-                )
-            )
+        elif (m3 > 1.0):
+            phase = "CONT"
 
         # =========================
         # BREAKOUT
         # =========================
+        price_jump = abs(close[-1] - close[-2]) / close[-2]
 
-        if (
-            ret1 > 0.08
-            and vol_ratio > 2
-        ):
-            breakout_signal.append(symbol)
+        trend_ok = (
+            close[-1] > close[-2] > close[-3]
+        )
+
+        breakout = (
+            (
+                price_jump > 0.02 and
+                vol_ratio > 1.8
+            )
+            or
+            (
+                price_jump > 0.015 and
+                vol_ratio > 2.3
+            )
+        ) and trend_ok
 
         # =========================
-        # SAVE
+        # EXTENSION
         # =========================
+        ma20 = np.mean(close[-20:])
 
-        prev_scores[symbol] = score
+        extension = (
+            (close[-1] / (ma20 + 1e-9)) - 1
+        ) * 10
+
+        # =========================
+        # BASE SCORE
+        # =========================
+        base_score = (
+            m1 * 0.55 +
+            m3 * 0.25 +
+            vol_ratio * 0.10 +
+            breakout * 0.35
+        )
+
+        # =========================
+        # REDIS TIME MODEL
+        # =========================
+        delta = 0.0
+        streak = 0
+
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+
+        if r:
+            prev_score = r.get(f"score:{ticker}")
+            prev_streak = r.get(f"streak:{ticker}")
+            prev_day = r.get(f"day:{ticker}")
+
+            # NEW
+            recent_high_streak = r.get(f"highstreak:{ticker}")
+            recent_high_streak = int(recent_high_streak) if recent_high_streak else 0
+
+            if prev_score is not None:
+                delta = base_score - float(prev_score)
+
+            if prev_streak is not None:
+                streak = int(prev_streak)
+
+            # =========================
+            # STREAK FIX
+            # =========================
+            if prev_day != today:
+
+                keep_signal = (
+                    phase in ["TRANSITION", "CONT"] and
+                    base_score > 0.9 and
+                    delta >= -0.15
+                )
+
+                if keep_signal:
+                    streak += 1
+                else:
+                    streak = 0
+
+            # =========================
+            # SAVE HIGHEST STREAK
+            # =========================
+            recent_high_streak = max(
+                recent_high_streak,
+                streak
+            )
+
+            # SAVE
+            r.set(f"score:{ticker}", base_score, ex=86400)
+            r.set(f"streak:{ticker}", streak, ex=86400 * 7)
+            r.set(f"day:{ticker}", today, ex=86400 * 7)
+
+            # NEW
+            r.set(
+                f"highstreak:{ticker}",
+                recent_high_streak,
+                ex=86400 * 14
+            )
+
+        else:
+            recent_high_streak = 0
+
+        # =========================
+        # STREAK BONUS
+        # =========================
+        streak_bonus = min(streak * 0.18, 0.9)
+
+        # =========================
+        # EXTENSION PENALTY
+        # =========================
+        ext_penalty = 0.0
+
+        if extension > 3.5:
+            ext_penalty = 1.0
+
+        elif extension > 2.5:
+            ext_penalty = 0.5
+
+        # =========================
+        # SECOND WIND
+        # =========================
+        second_wind = (
+            recent_high_streak >= 4 and
+            streak == 0 and
+            phase == "CONT" and
+            extension < 1.0 and
+            delta > -0.25
+        )
+
+        second_wind_bonus = 0.0
+
+        if second_wind:
+            second_wind_bonus = 0.75
+
+        # =========================
+        # FINAL SCORE
+        # =========================
+        score = (
+            base_score +
+            max(delta, 0) * 0.45 +
+            streak_bonus +
+            second_wind_bonus -
+            ext_penalty
+        )
+
+        score = round(float(score), 2)
+
+        return {
+            "ticker": ticker,
+            "phase": phase,
+            "score": score,
+            "streak": int(streak),
+            "breakout": bool(breakout),
+            "ext": round(float(extension), 2),
+
+            # NEW
+            "second_wind": bool(second_wind)
+        }
 
     except:
-        continue
+        return None
 
 # =========================
-# SAVE REDIS
-# =========================
-
-save_json("gr_prev_scores", prev_scores)
-save_json("gr_streak_map", streak_map)
-save_json("gr_theme_map", theme_map)
-save_json("gr_high_streak_map", high_streak_map)
-
-# =========================
-# SORT
-# =========================
-
-buy_signal = sorted(
-    buy_signal,
-    key=lambda x: x[1],
-    reverse=True
-)[:5]
-
-early_signal = sorted(
-    early_signal,
-    key=lambda x: x[1],
-    reverse=True
-)[:4]
-
-transition_signal = sorted(
-    transition_signal,
-    key=lambda x: x[1],
-    reverse=True
-)[:4]
-
-cont_signal = sorted(
-    cont_signal,
-    key=lambda x: x[1],
-    reverse=True
-)[:4]
-
-second_wind_signal = sorted(
-    second_wind_signal,
-    key=lambda x: x[1],
-    reverse=True
-)[:4]
-
-breakout_signal = breakout_signal[:4]
-
-# =========================
-# FORMAT
-# =========================
-
-lines = []
-
-lines.append(f"🚀 GrowthRadar {VERSION}")
-lines.append(f"Scan:{SCAN_SIZE} Valid:{valid_count}")
-lines.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
-
-if redis_ok:
-    lines.append("🟢 Redis: ON")
-else:
-    lines.append("🔴 Redis: OFF")
-
-lines.append("")
-
 # BUY
+# =========================
+def build_buy(df):
+    buy = df.copy()
 
-lines.append("💎 BUY SIGNAL")
+    structure_bonus = (
+        (buy["phase"] == "TRANSITION") * 0.7 +
+        (buy["phase"] == "CONT") * 0.45 +
+        (buy["phase"] == "EARLY") * 0.15
+    )
 
-if buy_signal:
-    for s, sc, st, ex in buy_signal:
-        lines.append(
-            f"{s} S:{sc} Streak:{st} Ext:{ex}"
-        )
-else:
-    lines.append("None")
+    streak_bonus = np.minimum(
+        buy["streak"] * 0.12,
+        0.8
+    )
 
-lines.append("")
+    ext_penalty = np.maximum(
+        buy["ext"] - 2.5,
+        0
+    ) * 0.35
 
-# EARLY
+    # NEW
+    second_wind_bonus = (
+        buy["second_wind"] * 0.9
+    )
 
-lines.append("🔥 EARLY")
+    buy["buy_score"] = (
+        buy["score"] +
+        structure_bonus +
+        streak_bonus +
+        second_wind_bonus -
+        ext_penalty
+    )
 
-if early_signal:
-    for s, sc in early_signal:
-        lines.append(
-            f"{s} S:{sc}"
-        )
-else:
-    lines.append("None")
+    buy = buy.sort_values(
+        "buy_score",
+        ascending=False
+    )
 
-lines.append("")
-
-# TRANSITION
-
-lines.append("⚡ TRANSITION")
-
-if transition_signal:
-    for s, sc in transition_signal:
-        lines.append(
-            f"{s} S:{sc}"
-        )
-else:
-    lines.append("None")
-
-lines.append("")
-
-# CONT
-
-lines.append("🔁 CONT")
-
-if cont_signal:
-    for s, sc in cont_signal:
-        lines.append(
-            f"{s} S:{sc}"
-        )
-else:
-    lines.append("None")
-
-lines.append("")
-
-# SECOND WIND
-
-lines.append("🌊 SECOND WIND")
-
-if second_wind_signal:
-    for s, sc, ex, hs in second_wind_signal:
-        lines.append(
-            f"{s} S:{sc} Ext:{ex} PrevStreak:{hs}"
-        )
-else:
-    lines.append("None")
-
-lines.append("")
-
-# BREAKOUT
-
-lines.append("🧨 BREAKOUT (event)")
-
-if breakout_signal:
-    for s in breakout_signal:
-        lines.append(s)
-else:
-    lines.append("None")
-
-msg = "\n".join(lines)
-
-print(msg)
+    return buy.head(5)
 
 # =========================
-# DISCORD
+# MESSAGE
 # =========================
+def build_message(df):
+    buy = build_buy(df)
 
-if WEBHOOK_URL:
-    try:
+    msg = []
+
+    msg.append("🚀 GrowthRadar v40.4 (SECOND WIND MODEL)")
+    msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
+    msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
+
+    msg.append("")
+    msg.append("💎 BUY SIGNAL")
+
+    for _, row in buy.iterrows():
+
+        tag = ""
+
+        if row.second_wind:
+            tag = " SW"
+
+        msg.append(
+            f"{row.ticker} "
+            f"S:{row.buy_score:.2f} "
+            f"Streak:{row.streak} "
+            f"Ext:{row.ext:.2f}"
+            f"{tag}"
+        )
+
+    msg.append("")
+    msg.append("🔥 EARLY")
+
+    early = (
+        df[df.phase == "EARLY"]
+        .sort_values("score", ascending=False)
+        .head(4)
+    )
+
+    if len(early):
+        for _, row in early.iterrows():
+            msg.append(f"{row.ticker} S:{row.score:.2f}")
+    else:
+        msg.append("None")
+
+    msg.append("")
+    msg.append("⚡ TRANSITION")
+
+    trans = (
+        df[df.phase == "TRANSITION"]
+        .sort_values("score", ascending=False)
+        .head(4)
+    )
+
+    if len(trans):
+        for _, row in trans.iterrows():
+            msg.append(f"{row.ticker} S:{row.score:.2f}")
+    else:
+        msg.append("None")
+
+    msg.append("")
+    msg.append("🔁 CONT")
+
+    cont = (
+        df[df.phase == "CONT"]
+        .sort_values("score", ascending=False)
+        .head(4)
+    )
+
+    if len(cont):
+        for _, row in cont.iterrows():
+            msg.append(f"{row.ticker} S:{row.score:.2f}")
+    else:
+        msg.append("None")
+
+    # =========================
+    # SECOND WIND
+    # =========================
+    msg.append("")
+    msg.append("🌊 SECOND WIND")
+
+    sw = (
+        df[df.second_wind]
+        .sort_values("score", ascending=False)
+        .head(4)
+    )
+
+    if len(sw):
+        for _, row in sw.iterrows():
+            msg.append(
+                f"{row.ticker} "
+                f"S:{row.score:.2f} "
+                f"Ext:{row.ext:.2f}"
+            )
+    else:
+        msg.append("None")
+
+    msg.append("")
+    msg.append("🧨 BREAKOUT (event)")
+
+    brk = df[df.breakout].head(4)
+
+    if len(brk):
+        for _, row in brk.iterrows():
+            msg.append(row.ticker)
+    else:
+        msg.append("None")
+
+    return "\n".join(msg)
+
+# =========================
+# RUN
+# =========================
+def run():
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    universe = load_universe()
+
+    results = []
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        futures = {
+            ex.submit(fetch, session, t): t
+            for t in universe
+        }
+
+        for f in as_completed(futures):
+            rlt = f.result()
+
+            if rlt:
+                results.append(rlt)
+
+    if not results:
+        print("NO DATA")
+        return
+
+    df = pd.DataFrame(results)
+
+    text = build_message(df)
+
+    print(text)
+
+    if WEBHOOK_URL:
         requests.post(
             WEBHOOK_URL,
-            json={"content": msg},
-            timeout=10
+            json={"content": text[:1900]}
         )
-    except:
-        pass
+
+# =========================
+# MAIN
+# =========================
+if __name__ == "__main__":
+    run()
