@@ -257,7 +257,7 @@ def fetch(session, ticker):
         # =========================
         second_wind = (
             recent_high_streak >= 4 and
-            streak == 0 and
+            streak <= 2 and
             phase in ["TRANSITION", "CONT"] and
             extension < 2.0 and
             delta > -0.25
