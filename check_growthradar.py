@@ -255,7 +255,7 @@ def fetch(session, ticker):
         # =========================
         # SECOND WIND
         # =========================
-        second_wind = (
+        second_wind_watch = (
             recent_high_streak >= 4 and
             streak <= 2 and
             phase in ["TRANSITION", "CONT"] and
@@ -263,9 +263,14 @@ def fetch(session, ticker):
             delta > -0.25
         )
 
+        second_wind_trigger = (
+            second_wind_watch and
+            breakout
+        )
+
         second_wind_bonus = 0.0
 
-        if second_wind:
+        if second_wind_watch:
             second_wind_bonus = 0.75
 
         # =========================
@@ -290,7 +295,8 @@ def fetch(session, ticker):
             "ext": round(float(extension), 2),
 
             # NEW
-            "second_wind": bool(second_wind)
+            "second_wind_watch": bool(second_wind_watch),
+            "second_wind_trigger": bool(second_wind_trigger)
         }
 
     except:
@@ -320,7 +326,7 @@ def build_buy(df):
 
     # NEW
     second_wind_bonus = (
-        buy["second_wind"] * 0.9
+        buy["second_wind_watch"] * 0.9
     )
 
     buy["buy_score"] = (
@@ -346,7 +352,7 @@ def build_message(df):
 
     msg = []
 
-    msg.append("🚀 GrowthRadar v40.5 (NEW SECOND WIND MODEL)")
+    msg.append("🚀 GrowthRadar v40.6 (SECOND WIND WATCH MODEL)")
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -358,8 +364,10 @@ def build_message(df):
 
         tag = ""
 
-        if row.second_wind:
-            tag = " SW"
+        if row.second_wind_trigger:
+            tag = " SW🔥"
+        elif row.second_wind_watch:
+            tag = " SW👀"
 
         msg.append(
             f"{row.ticker} "
@@ -418,16 +426,35 @@ def build_message(df):
     # SECOND WIND
     # =========================
     msg.append("")
-    msg.append("🌊 SECOND WIND")
+    msg.append("🌊👀 SECOND WIND WATCH")
 
-    sw = (
-        df[df.second_wind]
+    sw_watch = (
+        df[df.second_wind_watch]
         .sort_values("score", ascending=False)
         .head(4)
     )
 
-    if len(sw):
-        for _, row in sw.iterrows():
+    if len(sw_watch):
+        for _, row in sw_watch.iterrows():
+            msg.append(
+                f"{row.ticker} "
+                f"S:{row.score:.2f} "
+                f"Ext:{row.ext:.2f}"
+            )
+    else:
+        msg.append("None")
+
+    msg.append("")
+    msg.append("🌊🔥 SECOND WIND TRIGGER")
+
+    sw_trigger = (
+        df[df.second_wind_trigger]
+        .sort_values("score", ascending=False)
+        .head(4)
+    )
+
+    if len(sw_trigger):
+        for _, row in sw_trigger.iterrows():
             msg.append(
                 f"{row.ticker} "
                 f"S:{row.score:.2f} "
