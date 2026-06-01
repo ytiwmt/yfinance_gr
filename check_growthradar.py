@@ -265,8 +265,8 @@ def fetch(session, ticker):
             recent_high_streak >= 4 and
             streak <= 2 and
             phase in ["TRANSITION", "CONT"] and
-            extension < 2.0 and
-            delta > -0.25 and
+            extension < 5.0 and
+            delta > -0.3 and
             days_since_high <= 3
         )
 
