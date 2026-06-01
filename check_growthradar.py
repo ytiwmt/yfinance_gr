@@ -255,13 +255,23 @@ def fetch(session, ticker):
         # =========================
         # SECOND WIND
         # =========================
+        days_since_high = 0
+        if r:
+            prev_high_day = r.get(f"highday:{ticker}")
+            if prev_high_day:
+                days_since_high = (datetime.utcnow() - datetime.strptime(prev_high_day, "%Y-%m-%d")).days
+
         second_wind_watch = (
-            recent_high_streak >= 5 and
+            recent_high_streak >= 4 and
             streak <= 2 and
             phase in ["TRANSITION", "CONT"] and
             extension < 2.0 and
-            delta > -0.25
+            delta > -0.25 and
+            days_since_high <= 3
         )
+
+        if r:
+            r.set(f"highday:{ticker}", today, ex=86400 * 14)
 
         second_wind_trigger = (
             second_wind_watch and
@@ -352,7 +362,7 @@ def build_message(df):
 
     msg = []
 
-    msg.append("🚀 GrowthRadar v40.6 (SECOND WIND WATCH MODEL)")
+    msg.append("🚀 GrowthRadar v40.7 (SECOND WIND WATCH MODEL)")
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -520,3 +530,4 @@ def run():
 # =========================
 if __name__ == "__main__":
     run()
+
