@@ -255,32 +255,31 @@ def fetch(session, ticker):
         # =========================
         # SECOND WIND
         # =========================
-        days_since_high = 0
-        if r:
-            prev_high_day = r.get(f"highday:{ticker}")
-            if prev_high_day:
-                days_since_high = (datetime.utcnow() - datetime.strptime(prev_high_day, "%Y-%m-%d")).days
-
+        # days_since_highを廃止し、シンプルに整理
         second_wind_watch = (
-            recent_high_streak >= 4 and
+            recent_high_streak >= 5 and
             streak <= 2 and
             phase in ["TRANSITION", "CONT"] and
             extension < 5.0 and
-            delta > -0.3 and
-            days_since_high <= 3
+            delta > -0.3
         )
 
-        if r:
-            r.set(f"highday:{ticker}", today, ex=86400 * 14)
-
-        second_wind_trigger = (
+        # SWS (Second Wind Setup)
+        second_wind_setup = (
             second_wind_watch and
+            extension < 2.0 and
+            delta > 0
+        )
+
+        # SWT (Second Wind Trigger): Setup成立からのブレイクアウトに限定
+        second_wind_trigger = (
+            second_wind_setup and
             breakout
         )
 
+        # Setup段階の銘柄をボーナスで優遇
         second_wind_bonus = 0.0
-
-        if second_wind_watch:
+        if second_wind_setup:
             second_wind_bonus = 0.75
 
         # =========================
@@ -306,6 +305,7 @@ def fetch(session, ticker):
 
             # NEW
             "second_wind_watch": bool(second_wind_watch),
+            "second_wind_setup": bool(second_wind_setup),
             "second_wind_trigger": bool(second_wind_trigger)
         }
 
@@ -334,9 +334,9 @@ def build_buy(df):
         0
     ) * 0.35
 
-    # NEW
+    # Setupを優遇
     second_wind_bonus = (
-        buy["second_wind_watch"] * 0.9
+        buy["second_wind_setup"] * 0.9
     )
 
     buy["buy_score"] = (
@@ -362,7 +362,7 @@ def build_message(df):
 
     msg = []
 
-    msg.append("🚀 GrowthRadar v40.7 (SECOND WIND WATCH MODEL)")
+    msg.append("🚀 GrowthRadar v40.8 (SECOND WIND SETUP MODEL)")
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -376,6 +376,8 @@ def build_message(df):
 
         if row.second_wind_trigger:
             tag = " SW🔥"
+        elif row.second_wind_setup:
+            tag = " SW🧩"
         elif row.second_wind_watch:
             tag = " SW👀"
 
@@ -433,7 +435,21 @@ def build_message(df):
         msg.append("None")
 
     # =========================
-    # SECOND WIND
+    # FIRST WAVE
+    # =========================
+    msg.append("")
+    msg.append("🌊 FIRST WAVE")
+
+    brk = df[df.breakout].head(4)
+
+    if len(brk):
+        for _, row in brk.iterrows():
+            msg.append(row.ticker)
+    else:
+        msg.append("None")
+
+    # =========================
+    # SECOND WIND WATCH
     # =========================
     msg.append("")
     msg.append("🌊👀 SECOND WIND WATCH")
@@ -454,6 +470,31 @@ def build_message(df):
     else:
         msg.append("None")
 
+    # =========================
+    # SECOND WIND SETUP
+    # =========================
+    msg.append("")
+    msg.append("🌊🧩 SECOND WIND SETUP")
+
+    sw_setup = (
+        df[df.second_wind_setup]
+        .sort_values("score", ascending=False)
+        .head(4)
+    )
+
+    if len(sw_setup):
+        for _, row in sw_setup.iterrows():
+            msg.append(
+                f"{row.ticker} "
+                f"S:{row.score:.2f} "
+                f"Ext:{row.ext:.2f}"
+            )
+    else:
+        msg.append("None")
+
+    # =========================
+    # SECOND WIND TRIGGER
+    # =========================
     msg.append("")
     msg.append("🌊🔥 SECOND WIND TRIGGER")
 
@@ -470,17 +511,6 @@ def build_message(df):
                 f"S:{row.score:.2f} "
                 f"Ext:{row.ext:.2f}"
             )
-    else:
-        msg.append("None")
-
-    msg.append("")
-    msg.append("🧨 BREAKOUT (event)")
-
-    brk = df[df.breakout].head(4)
-
-    if len(brk):
-        for _, row in brk.iterrows():
-            msg.append(row.ticker)
     else:
         msg.append("None")
 
@@ -530,4 +560,3 @@ def run():
 # =========================
 if __name__ == "__main__":
     run()
-
