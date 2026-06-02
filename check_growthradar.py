@@ -257,7 +257,7 @@ def fetch(session, ticker):
         # =========================
         # days_since_highを廃止し、シンプルに整理
         second_wind_watch = (
-            recent_high_streak >= 5 and
+            recent_high_streak >= 4 and
             streak <= 2 and
             phase in ["TRANSITION", "CONT"] and
             extension < 5.0 and
