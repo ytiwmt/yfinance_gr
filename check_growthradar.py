@@ -284,7 +284,7 @@ def fetch(session, ticker):
             second_wind_watch and
             extension < 2.5 and
             delta > -0.1 and
-            streak <= 2
+            streak <= 4
         )
 
         # SWT (Second Wind Trigger)
