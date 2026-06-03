@@ -282,8 +282,8 @@ def fetch(session, ticker):
         # SWS (Second Wind Setup)
         second_wind_setup = (
             second_wind_watch and
-            extension < 2.0 and
-            delta > 0
+            extension < 2.5 and
+            delta > -0.1
         )
 
         # SWT (Second Wind Trigger)
@@ -375,7 +375,7 @@ def build_message(df):
 
     msg = []
 
-    msg.append("🚀 GrowthRadar v40.10 (ETF OPTIMIZED MODEL)") 
+    msg.append("🚀 GrowthRadar v40.11 (SWS THRESHOLD TUNING MODEL)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
