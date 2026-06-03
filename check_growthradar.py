@@ -25,6 +25,17 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0"
 }
 
+# ETF BLACKLIST
+ETF_BLACKLIST = {
+    "QQQ", "ARKK", "SOXX", "XLF",
+    "XLK", "XBI", "IWM", "SPY",
+    "WGMI", "QCML",
+    "TQQQ", "SQQQ",
+    "SOXL", "SOXS",
+    "ARKW", "ARKG",
+    "SMH", "IGV", "BOTZ", "TAN"
+}
+
 # =========================
 # REDIS
 # =========================
@@ -68,6 +79,9 @@ def load_universe():
 
     symbols.update(fallback)
 
+    # UNIVERSE FILTER (SINGLE RESPONSIBILITY)
+    symbols = [s for s in symbols if s not in ETF_BLACKLIST]
+
     symbols = list(symbols)
     random.shuffle(symbols)
 
@@ -77,6 +91,8 @@ def load_universe():
 # FETCH
 # =========================
 def fetch(session, ticker):
+    # fetch側のETFチェック（二重防御）は削除
+
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=6mo&interval=1d"
 
@@ -255,9 +271,8 @@ def fetch(session, ticker):
         # =========================
         # SECOND WIND
         # =========================
-        # days_since_highを廃止し、シンプルに整理
         second_wind_watch = (
-            recent_high_streak >= 4 and
+            recent_high_streak >= 5 and
             streak <= 2 and
             phase in ["TRANSITION", "CONT"] and
             extension < 5.0 and
@@ -271,13 +286,12 @@ def fetch(session, ticker):
             delta > 0
         )
 
-        # SWT (Second Wind Trigger): Setup成立からのブレイクアウトに限定
+        # SWT (Second Wind Trigger)
         second_wind_trigger = (
             second_wind_setup and
             breakout
         )
 
-        # Setup段階の銘柄をボーナスで優遇
         second_wind_bonus = 0.0
         if second_wind_setup:
             second_wind_bonus = 0.75
@@ -334,7 +348,6 @@ def build_buy(df):
         0
     ) * 0.35
 
-    # Setupを優遇
     second_wind_bonus = (
         buy["second_wind_setup"] * 0.9
     )
@@ -362,7 +375,7 @@ def build_message(df):
 
     msg = []
 
-    msg.append("🚀 GrowthRadar v40.8 (SECOND WIND SETUP MODEL)")
+    msg.append("🚀 GrowthRadar v40.10 (ETF OPTIMIZED MODEL)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
