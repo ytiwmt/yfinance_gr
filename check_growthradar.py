@@ -282,7 +282,7 @@ def fetch(session, ticker):
         # SWS (Second Wind Setup)
         second_wind_setup = (
             second_wind_watch and
-            extension < 2.5 and
+            extension < 3 and
             delta > -0.1 and
             streak <= 4
         )
