@@ -29,7 +29,7 @@ HEADERS = {
 ETF_BLACKLIST = {
     "QQQ", "ARKK", "SOXX", "XLF",
     "XLK", "XBI", "IWM", "SPY",
-    "WGMI", "QCML",
+    "WGMI", "QCML", "RKLX",
     "TQQQ", "SQQQ",
     "SOXL", "SOXS",
     "ARKW", "ARKG",
