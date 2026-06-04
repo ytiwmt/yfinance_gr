@@ -375,7 +375,7 @@ def build_message(df):
 
     msg = []
 
-    msg.append("🚀 GrowthRadar v40.12 (SWS THRESHOLD TUNING MODEL)") 
+    msg.append("🚀 GrowthRadar v40.13 (SWW THRESHOLD TUNING MODEL)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
