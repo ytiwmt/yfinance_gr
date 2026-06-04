@@ -30,7 +30,7 @@ ETF_BLACKLIST = {
     "QQQ", "ARKK", "SOXX", "XLF",
     "XLK", "XBI", "IWM", "SPY",
     "WGMI", "QCML", "RKLX",
-    "TQQQ", "SQQQ",
+    "TQQQ", "SQQQ", "RGTX",
     "SOXL", "SOXS",
     "ARKW", "ARKG",
     "SMH", "IGV", "BOTZ", "TAN"
