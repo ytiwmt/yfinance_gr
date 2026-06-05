@@ -3,6 +3,7 @@ import requests
 import random
 import re
 import redis
+import json  # NEW: sws_logのシリアライズ用に追加
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -297,6 +298,20 @@ def fetch(session, ticker):
         if second_wind_setup:
             second_wind_bonus = 0.75
 
+        # NEW: SWS発火ログの保存（後からの検証用）
+        if r:
+            r.set(
+                f"sws_log:{ticker}:{today}",
+                json.dumps({
+                    "extension": extension,
+                    "streak": streak,
+                    "delta": delta,
+                    "phase": phase,
+                    "hit": bool(second_wind_setup)
+                }),
+                ex=86400 * 14
+            )
+
         # =========================
         # FINAL SCORE
         # =========================
@@ -374,9 +389,20 @@ def build_buy(df):
 def build_message(df):
     buy = build_buy(df)
 
+    # ターゲットリストを抽出
+    sw_watch = df[df.second_wind_watch]
+    sw_setup = df[df.second_wind_setup]
+
+    # NEW: “調整判断フラグ”の評価（スコープへの定義）
+    sws_adjust_signal = (
+        len(sw_watch) == 0 or
+        len(sw_setup) == 0
+    )
+
     msg = []
 
-    msg.append("🚀 GrowthRadar v40.13 (SWW THRESHOLD TUNING MODEL)") 
+    # NEW: バージョン名の変更
+    msg.append("🚀 GrowthRadar v40.14 (SIGNAL MONITORING & META MODEL)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -468,14 +494,10 @@ def build_message(df):
     msg.append("")
     msg.append("🌊👀 SECOND WIND WATCH")
 
-    sw_watch = (
-        df[df.second_wind_watch]
-        .sort_values("score", ascending=False)
-        .head(4)
-    )
+    sw_watch_sorted = sw_watch.sort_values("score", ascending=False).head(4)
 
-    if len(sw_watch):
-        for _, row in sw_watch.iterrows():
+    if len(sw_watch_sorted):
+        for _, row in sw_watch_sorted.iterrows():
             msg.append(
                 f"{row.ticker} "
                 f"S:{row.score:.2f} "
@@ -490,14 +512,10 @@ def build_message(df):
     msg.append("")
     msg.append("🌊🧩 SECOND WIND SETUP")
 
-    sw_setup = (
-        df[df.second_wind_setup]
-        .sort_values("score", ascending=False)
-        .head(4)
-    )
+    sw_setup_sorted = sw_setup.sort_values("score", ascending=False).head(4)
 
-    if len(sw_setup):
-        for _, row in sw_setup.iterrows():
+    if len(sw_setup_sorted):
+        for _, row in sw_setup_sorted.iterrows():
             msg.append(
                 f"{row.ticker} "
                 f"S:{row.score:.2f} "
