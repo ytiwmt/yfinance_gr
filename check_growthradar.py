@@ -93,10 +93,9 @@ def load_universe():
 # FETCH
 # =========================
 def fetch(session, ticker):
-    # fetch側のETFチェック（二重防御）は削除
-
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=6mo&interval=1d"
+        # 年足リターン（約252営業日前）を計算するため、取得範囲を 6mo から 1y に変更
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1y&interval=1d"
 
         res = session.get(url, timeout=5)
 
@@ -126,6 +125,27 @@ def fetch(session, ticker):
 
         if vol_base < MIN_VOL:
             return None
+
+        # ---------------------------------------------------------
+        # NEW: 年足トレンドリターンの計算と完全死トレンド除外（任意）
+        # ---------------------------------------------------------
+        # 252営業日前、またはデータが足りない場合は取得可能な最も古いデータを使用
+        idx_252d = max(-len(close), -252)
+        price_252d_ago = close[idx_252d]
+        yearly_return = (price / price_252d_ago) - 1 if price_252d_ago else 0
+
+        # 完全死トレンド除外（年足リターンが -60% 未満なら除外）
+        if yearly_return < -0.6:
+            return None
+
+        # 年足トレンド係数の分類
+        if yearly_return > 0.3:
+            yearly_trend_factor = 1.0
+        elif yearly_return > -0.2:
+            yearly_trend_factor = 0.7
+        else:
+            yearly_trend_factor = 0.4
+        # ---------------------------------------------------------
 
         # =========================
         # RETURNS
@@ -323,6 +343,9 @@ def fetch(session, ticker):
             ext_penalty
         )
 
+        # NEW: 年足トレンド係数を掛け算で統合
+        score = score * yearly_trend_factor
+
         score = round(float(score), 2)
 
         return {
@@ -402,7 +425,7 @@ def build_message(df):
     msg = []
 
     # NEW: バージョン名の変更
-    msg.append("🚀 GrowthRadar v40.14 (SIGNAL MONITORING & META MODEL)") 
+    msg.append("🚀 GrowthRadar v40.15 (LONG TERM WEIGHT ADDITION MODEL)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
