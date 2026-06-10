@@ -126,27 +126,6 @@ def fetch(session, ticker):
         if vol_base < MIN_VOL:
             return None
 
-        # ---------------------------------------------------------
-        # NEW: 年足トレンドリターンの計算と完全死トレンド除外（任意）
-        # ---------------------------------------------------------
-        # 252営業日前、またはデータが足りない場合は取得可能な最も古いデータを使用
-        idx_252d = max(-len(close), -252)
-        price_252d_ago = close[idx_252d]
-        yearly_return = (price / price_252d_ago) - 1 if price_252d_ago else 0
-
-        # 完全死トレンド除外（年足リターンが -60% 未満なら除外）
-        if yearly_return < -0.6:
-            return None
-
-        # 年足トレンド係数の分類
-        if yearly_return > 0.3:
-            yearly_trend_factor = 1.0
-        elif yearly_return > -0.2:
-            yearly_trend_factor = 0.7
-        else:
-            yearly_trend_factor = 0.4
-        # ---------------------------------------------------------
-
         # =========================
         # RETURNS
         # =========================
@@ -201,6 +180,22 @@ def fetch(session, ticker):
         extension = (
             (close[-1] / (ma20 + 1e-9)) - 1
         ) * 10
+
+        # ---------------------------------------------------------
+        # UPDATE v40.16: MA120 / MA200 & LONG TERM TREND BONUS
+        # ---------------------------------------------------------
+        ma120 = np.mean(close[-120:]) if len(close) >= 120 else np.mean(close)
+        ma200 = np.mean(close[-200:]) if len(close) >= 200 else np.mean(close)
+
+        long_term_bonus = 0.0
+
+        if price > ma200:
+            long_term_bonus += 0.25
+
+        if len(close) >= 200:
+            if ma120 > ma200:
+                long_term_bonus += 0.25
+        # ---------------------------------------------------------
 
         # =========================
         # BASE SCORE
@@ -339,12 +334,10 @@ def fetch(session, ticker):
             base_score +
             max(delta, 0) * 0.45 +
             streak_bonus +
-            second_wind_bonus -
+            second_wind_bonus +
+            long_term_bonus -
             ext_penalty
         )
-
-        # NEW: 年足トレンド係数を掛け算で統合
-        score = score * yearly_trend_factor
 
         score = round(float(score), 2)
 
@@ -359,7 +352,10 @@ def fetch(session, ticker):
             # NEW
             "second_wind_watch": bool(second_wind_watch),
             "second_wind_setup": bool(second_wind_setup),
-            "second_wind_trigger": bool(second_wind_trigger)
+            "second_wind_trigger": bool(second_wind_trigger),
+            
+            # UPDATE v40.16
+            "long_term_bonus": round(long_term_bonus, 2)
         }
 
     except:
@@ -424,8 +420,8 @@ def build_message(df):
 
     msg = []
 
-    # NEW: バージョン名の変更
-    msg.append("🚀 GrowthRadar v40.15 (LONG TERM WEIGHT ADDITION MODEL)") 
+    # UPDATE v40.16: バージョン名の変更
+    msg.append("🚀 GrowthRadar v40.16 (LONG TERM TREND PRIORITY MODEL)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -444,9 +440,11 @@ def build_message(df):
         elif row.second_wind_watch:
             tag = " SW👀"
 
+        # UPDATE v40.16: LTのインジケータ表示を追加
         msg.append(
             f"{row.ticker} "
             f"S:{row.buy_score:.2f} "
+            f"LT:{row.long_term_bonus:.2f} "
             f"Streak:{row.streak} "
             f"Ext:{row.ext:.2f}"
             f"{tag}"
