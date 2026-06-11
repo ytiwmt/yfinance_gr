@@ -182,7 +182,7 @@ def fetch(session, ticker):
         ) * 10
 
         # ---------------------------------------------------------
-        # UPDATE v40.16: MA120 / MA200 & LONG TERM TREND BONUS
+        # MA120 / MA200 & LONG TERM TREND BONUS
         # ---------------------------------------------------------
         ma120 = np.mean(close[-120:]) if len(close) >= 120 else np.mean(close)
         ma200 = np.mean(close[-200:]) if len(close) >= 200 else np.mean(close)
@@ -309,9 +309,32 @@ def fetch(session, ticker):
             breakout
         )
 
+        # ---------------------------------------------------------
+        # UPDATE v40.17: YEARLY TREND FACTOR & ENFORCED SWS BONUS
+        # ---------------------------------------------------------
+        idx_252d = max(-len(close), -252)
+        price_252d_ago = close[idx_252d]
+        yearly_return = (price / price_252d_ago) - 1 if price_252d_ago else 0
+
+        if yearly_return > 1.0:
+            yearly_trend_factor = 1.0
+        elif yearly_return > 0.5:
+            yearly_trend_factor = 0.9
+        elif yearly_return > 0.2:
+            yearly_trend_factor = 0.8
+        elif yearly_return > 0:
+            yearly_trend_factor = 0.7
+        elif yearly_return > -0.2:
+            yearly_trend_factor = 0.5
+        elif yearly_return > -0.5:
+            yearly_trend_factor = 0.25
+        else:
+            yearly_trend_factor = 0.10
+
         second_wind_bonus = 0.0
         if second_wind_setup:
-            second_wind_bonus = 0.75
+            second_wind_bonus = 0.75 * yearly_trend_factor
+        # ---------------------------------------------------------
 
         # NEW: SWS発火ログの保存（後からの検証用）
         if r:
@@ -354,7 +377,6 @@ def fetch(session, ticker):
             "second_wind_setup": bool(second_wind_setup),
             "second_wind_trigger": bool(second_wind_trigger),
             
-            # UPDATE v40.16
             "long_term_bonus": round(long_term_bonus, 2)
         }
 
@@ -420,8 +442,8 @@ def build_message(df):
 
     msg = []
 
-    # UPDATE v40.16: バージョン名の変更
-    msg.append("🚀 GrowthRadar v40.16 (LONG TERM TREND PRIORITY MODEL)") 
+    # UPDATE v40.17: バージョン名の変更
+    msg.append("🚀 GrowthRadar v40.17 (LONG TERM TREND ENFORCEMENT MODEL)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -440,7 +462,6 @@ def build_message(df):
         elif row.second_wind_watch:
             tag = " SW👀"
 
-        # UPDATE v40.16: LTのインジケータ表示を追加
         msg.append(
             f"{row.ticker} "
             f"S:{row.buy_score:.2f} "
