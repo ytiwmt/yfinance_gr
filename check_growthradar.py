@@ -310,26 +310,21 @@ def fetch(session, ticker):
         )
 
         # ---------------------------------------------------------
-        # UPDATE v40.17: YEARLY TREND FACTOR & ENFORCED SWS BONUS
+        # LONG TERM TREND VALIDATION MODEL
         # ---------------------------------------------------------
         idx_252d = max(-len(close), -252)
         price_252d_ago = close[idx_252d]
         yearly_return = (price / price_252d_ago) - 1 if price_252d_ago else 0
 
-        if yearly_return > 1.0:
+        high_52w = max(close)
+        high_distance = (price / high_52w) - 1
+
+        if yearly_return > 0.3 and high_distance > -0.25:
             yearly_trend_factor = 1.0
-        elif yearly_return > 0.5:
-            yearly_trend_factor = 0.9
-        elif yearly_return > 0.2:
-            yearly_trend_factor = 0.8
-        elif yearly_return > 0:
-            yearly_trend_factor = 0.7
-        elif yearly_return > -0.2:
+        elif yearly_return > -0.2 and high_distance > -0.4:
             yearly_trend_factor = 0.5
-        elif yearly_return > -0.5:
-            yearly_trend_factor = 0.25
         else:
-            yearly_trend_factor = 0.10
+            yearly_trend_factor = 0.0
 
         second_wind_bonus = 0.0
         if second_wind_setup:
@@ -361,6 +356,12 @@ def fetch(session, ticker):
             long_term_bonus -
             ext_penalty
         )
+
+        # ---------------------------------------------------------
+        # UPDATE v40.18: ADD YEARLY TREND FACTOR TO FINAL SCORE
+        # ---------------------------------------------------------
+        score += yearly_trend_factor
+        # ---------------------------------------------------------
 
         score = round(float(score), 2)
 
@@ -442,8 +443,8 @@ def build_message(df):
 
     msg = []
 
-    # UPDATE v40.17: バージョン名の変更
-    msg.append("🚀 GrowthRadar v40.17 (LONG TERM TREND ENFORCEMENT MODEL)") 
+    # UPDATE v40.18: バージョン名の変更
+    msg.append("🚀 GrowthRadar v40.18 (LONG TERM TREND VALIDATION MODEL)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
