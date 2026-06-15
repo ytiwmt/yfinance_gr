@@ -307,6 +307,7 @@ def fetch(session, ticker):
         second_wind_trigger = (
             second_wind_setup and
             breakout
+            yearly_trend_factor > 0
         )
 
         # ---------------------------------------------------------
@@ -444,7 +445,7 @@ def build_message(df):
     msg = []
 
     # UPDATE v40.18: バージョン名の変更
-    msg.append("🚀 GrowthRadar v40.18 (LONG TERM TREND VALIDATION MODEL)") 
+    msg.append("🚀 GrowthRadar v40.19 (SECOND WIND TREND GATE MODEL)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
