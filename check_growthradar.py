@@ -325,6 +325,8 @@ def fetch(session, ticker):
             yearly_trend_factor = 1.0
         elif yearly_return > -0.2 and high_distance > -0.4:
             yearly_trend_factor = 0.5
+        elif yearly_return > -0.35 and high_distance > -0.55:
+    　　     yearly_trend_factor = 0.25
         else:
             yearly_trend_factor = 0.0
 
