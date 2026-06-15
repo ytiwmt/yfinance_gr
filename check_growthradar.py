@@ -306,7 +306,7 @@ def fetch(session, ticker):
         # SWT (Second Wind Trigger)
         second_wind_trigger = (
             second_wind_setup and
-            breakout
+            breakout and
             yearly_trend_factor > 0
         )
 
