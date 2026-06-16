@@ -534,7 +534,12 @@ def build_message(df):
             msg.append(row.ticker)
     else:
         msg.append("None")
-
+        
+    # DEBUG
+    msg.append("")
+    msg.append(f"DEBUG SWW RAW:{len(df[df.second_wind_watch])}")
+    msg.append(f"DEBUG SWS RAW:{len(df[df.second_wind_setup])}")
+    
     # =========================
     # SECOND WIND WATCH
     # =========================
