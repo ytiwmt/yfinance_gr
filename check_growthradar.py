@@ -84,15 +84,6 @@ def load_universe():
     # UNIVERSE FILTER (SINGLE RESPONSIBILITY)
     symbols = [s for s in symbols if s not in ETF_BLACKLIST]
 
-    # ---------------------------------------------------------
-    # UPDATE v40.20: FIX SEED BY DATE FOR STABLE DAILY UNIVERSE
-    # ---------------------------------------------------------
-    symbols = sorted(symbols)
-
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    random.seed(today)
-    # ---------------------------------------------------------
-
     symbols = list(symbols)
     random.shuffle(symbols)
 
@@ -465,7 +456,7 @@ def build_message(df):
     msg = []
 
     # UPDATE v40.20: バージョン名の変更
-    msg.append("🚀 GrowthRadar v40.21 (DAILY STABLE UNIVERSE MODEL)") 
+    msg.append("🚀 GrowthRadar v40.20 (SOFT SECOND WIND RANK MODEL)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
