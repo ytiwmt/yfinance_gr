@@ -3,7 +3,7 @@ import requests
 import random
 import re
 import redis
-import json  # NEW: sws_logのシリアライズ用に追加
+import json
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -81,7 +81,6 @@ def load_universe():
 
     symbols.update(fallback)
 
-    # UNIVERSE FILTER (SINGLE RESPONSIBILITY)
     symbols = [s for s in symbols if s not in ETF_BLACKLIST]
 
     symbols = list(symbols)
@@ -94,7 +93,6 @@ def load_universe():
 # =========================
 def fetch(session, ticker):
     try:
-        # 年足リターン（約252営業日前）を計算するため、取得範囲を 6mo から 1y に変更
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1y&interval=1d"
 
         res = session.get(url, timeout=5)
@@ -126,9 +124,6 @@ def fetch(session, ticker):
         if vol_base < MIN_VOL:
             return None
 
-        # =========================
-        # RETURNS
-        # =========================
         def ret(a, b):
             return (a / b - 1) if b else 0
 
@@ -137,9 +132,6 @@ def fetch(session, ticker):
 
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
-        # =========================
-        # PHASE
-        # =========================
         phase = "NONE"
 
         if (0.25 < m1 < 0.7 and m3 < 0.6):
@@ -151,9 +143,6 @@ def fetch(session, ticker):
         elif (m3 > 1.0):
             phase = "CONT"
 
-        # =========================
-        # BREAKOUT
-        # =========================
         price_jump = abs(close[-1] - close[-2]) / close[-2]
 
         trend_ok = (
@@ -172,18 +161,12 @@ def fetch(session, ticker):
             )
         ) and trend_ok
 
-        # =========================
-        # EXTENSION
-        # =========================
         ma20 = np.mean(close[-20:])
 
         extension = (
             (close[-1] / (ma20 + 1e-9)) - 1
         ) * 10
 
-        # ---------------------------------------------------------
-        # MA120 / MA200 & LONG TERM TREND BONUS
-        # ---------------------------------------------------------
         ma120 = np.mean(close[-120:]) if len(close) >= 120 else np.mean(close)
         ma200 = np.mean(close[-200:]) if len(close) >= 200 else np.mean(close)
 
@@ -195,11 +178,7 @@ def fetch(session, ticker):
         if len(close) >= 200:
             if ma120 > ma200:
                 long_term_bonus += 0.25
-        # ---------------------------------------------------------
 
-        # =========================
-        # BASE SCORE
-        # =========================
         base_score = (
             m1 * 0.55 +
             m3 * 0.25 +
@@ -207,9 +186,6 @@ def fetch(session, ticker):
             breakout * 0.35
         )
 
-        # =========================
-        # REDIS TIME MODEL
-        # =========================
         delta = 0.0
         streak = 0
 
@@ -220,7 +196,6 @@ def fetch(session, ticker):
             prev_streak = r.get(f"streak:{ticker}")
             prev_day = r.get(f"day:{ticker}")
 
-            # NEW
             recent_high_streak = r.get(f"highstreak:{ticker}")
             recent_high_streak = int(recent_high_streak) if recent_high_streak else 0
 
@@ -230,9 +205,6 @@ def fetch(session, ticker):
             if prev_streak is not None:
                 streak = int(prev_streak)
 
-            # =========================
-            # STREAK FIX
-            # =========================
             if prev_day != today:
 
                 keep_signal = (
@@ -246,48 +218,26 @@ def fetch(session, ticker):
                 else:
                     streak = 0
 
-            # =========================
-            # SAVE HIGHEST STREAK
-            # =========================
-            recent_high_streak = max(
-                recent_high_streak,
-                streak
-            )
+            recent_high_streak = max(recent_high_streak, streak)
 
-            # SAVE
             r.set(f"score:{ticker}", base_score, ex=86400)
             r.set(f"streak:{ticker}", streak, ex=86400 * 7)
             r.set(f"day:{ticker}", today, ex=86400 * 7)
 
-            # NEW
-            r.set(
-                f"highstreak:{ticker}",
-                recent_high_streak,
-                ex=86400 * 14
-            )
+            r.set(f"highstreak:{ticker}", recent_high_streak, ex=86400 * 14)
 
         else:
             recent_high_streak = 0
 
-        # =========================
-        # STREAK BONUS
-        # =========================
         streak_bonus = min(streak * 0.18, 0.9)
 
-        # =========================
-        # EXTENSION PENALTY
-        # =========================
         ext_penalty = 0.0
 
         if extension > 3.5:
             ext_penalty = 1.0
-
         elif extension > 2.5:
             ext_penalty = 0.5
 
-        # =========================
-        # LONG TERM TREND VALIDATION MODEL
-        # =========================
         idx_252d = max(-len(close), -252)
         price_252d_ago = close[idx_252d]
         yearly_return = (price / price_252d_ago) - 1 if price_252d_ago else 0
@@ -304,9 +254,6 @@ def fetch(session, ticker):
         else:
             yearly_trend_factor = 0.0
 
-        # =========================
-        # SECOND WIND (UPDATE v40.20)
-        # =========================
         second_wind_watch = (
             recent_high_streak >= 3 and
             streak <= 4 and
@@ -332,13 +279,8 @@ def fetch(session, ticker):
 
         second_wind_bonus = 0.0
         if second_wind_setup:
-            second_wind_bonus = (
-                0.75 *
-                second_wind_quality
-            )
-        # ---------------------------------------------------------
+            second_wind_bonus = 0.75 * second_wind_quality
 
-        # NEW: SWS発火ログの保存（後からの検証用）
         if r:
             r.set(
                 f"sws_log:{ticker}:{today}",
@@ -352,9 +294,6 @@ def fetch(session, ticker):
                 ex=86400 * 14
             )
 
-        # =========================
-        # FINAL SCORE
-        # =========================
         score = (
             base_score +
             max(delta, 0) * 0.45 +
@@ -366,6 +305,17 @@ def fetch(session, ticker):
 
         score = round(float(score), 2)
 
+        # =========================
+        # PRIME WINDOW (NEW v41.0)
+        # =========================
+        long_term_ok = yearly_trend_factor > 0.25
+
+        prime_window = (
+            (base_score > 1.0) and
+            second_wind_setup and
+            long_term_ok
+        )
+
         return {
             "ticker": ticker,
             "phase": phase,
@@ -374,12 +324,12 @@ def fetch(session, ticker):
             "breakout": bool(breakout),
             "ext": round(float(extension), 2),
 
-            # NEW
             "second_wind_watch": bool(second_wind_watch),
             "second_wind_setup": bool(second_wind_setup),
             "second_wind_trigger": bool(second_wind_trigger),
-            
-            "long_term_bonus": round(long_term_bonus, 2)
+
+            "long_term_bonus": round(long_term_bonus, 2),
+            "prime_window": bool(prime_window)
         }
 
     except:
@@ -419,21 +369,7 @@ def build_buy(df):
         ext_penalty
     )
 
-    # ---------------------------------------------------------
-    # UPDATE v40.20: FILTER LONG TERM DOWNWARD TRENDS FROM BUY RANKING
-    # ---------------------------------------------------------
-    buy = buy[
-        ~(
-            (buy["second_wind_setup"]) &
-            (buy["long_term_bonus"] == 0)
-        )
-    ]
-    # ---------------------------------------------------------
-
-    buy = buy.sort_values(
-        "buy_score",
-        ascending=False
-    )
+    buy = buy.sort_values("buy_score", ascending=False)
 
     return buy.head(5)
 
@@ -443,20 +379,9 @@ def build_buy(df):
 def build_message(df):
     buy = build_buy(df)
 
-    # ターゲットリストを抽出
-    sw_watch = df[df.second_wind_watch]
-    sw_setup = df[df.second_wind_setup]
-
-    # NEW: “調整判断フラグ”の評価（スコープへの定義）
-    sws_adjust_signal = (
-        len(sw_watch) == 0 or
-        len(sw_setup) == 0
-    )
-
     msg = []
 
-    # UPDATE v40.20: バージョン名の変更
-    msg.append("🚀 GrowthRadar v40.20 (SOFT SECOND WIND RANK MODEL)") 
+    msg.append("🚀 GrowthRadar v41.0 (PRIME WINDOW MODEL)")
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -465,9 +390,7 @@ def build_message(df):
     msg.append("💎 BUY SIGNAL")
 
     for _, row in buy.iterrows():
-
         tag = ""
-
         if row.second_wind_trigger:
             tag = " SW🔥"
         elif row.second_wind_setup:
@@ -476,133 +399,17 @@ def build_message(df):
             tag = " SW👀"
 
         msg.append(
-            f"{row.ticker} "
-            f"S:{row.buy_score:.2f} "
-            f"LT:{row.long_term_bonus:.2f} "
-            f"Streak:{row.streak} "
-            f"Ext:{row.ext:.2f}"
-            f"{tag}"
+            f"{row.ticker} S:{row.buy_score:.2f} LT:{row.long_term_bonus:.2f} Streak:{row.streak} Ext:{row.ext:.2f}{tag}"
         )
 
     msg.append("")
-    msg.append("🔥 EARLY")
+    msg.append("👑 PRIME WINDOW")
 
-    early = (
-        df[df.phase == "EARLY"]
-        .sort_values("score", ascending=False)
-        .head(4)
-    )
+    prime = df[df.prime_window].sort_values("score", ascending=False)
 
-    if len(early):
-        for _, row in early.iterrows():
-            msg.append(f"{row.ticker} S:{row.score:.2f}")
-    else:
-        msg.append("None")
-
-    msg.append("")
-    msg.append("⚡ TRANSITION")
-
-    trans = (
-        df[df.phase == "TRANSITION"]
-        .sort_values("score", ascending=False)
-        .head(4)
-    )
-
-    if len(trans):
-        for _, row in trans.iterrows():
-            msg.append(f"{row.ticker} S:{row.score:.2f}")
-    else:
-        msg.append("None")
-
-    msg.append("")
-    msg.append("🔁 CONT")
-
-    cont = (
-        df[df.phase == "CONT"]
-        .sort_values("score", ascending=False)
-        .head(4)
-    )
-
-    if len(cont):
-        for _, row in cont.iterrows():
-            msg.append(f"{row.ticker} S:{row.score:.2f}")
-    else:
-        msg.append("None")
-
-    # =========================
-    # FIRST WAVE
-    # =========================
-    msg.append("")
-    msg.append("🌊 FIRST WAVE")
-
-    brk = df[df.breakout].head(4)
-
-    if len(brk):
-        for _, row in brk.iterrows():
-            msg.append(row.ticker)
-    else:
-        msg.append("None")
-        
-    # DEBUG
-    msg.append("")
-    msg.append(f"DEBUG SWW RAW:{len(df[df.second_wind_watch])}")
-    msg.append(f"DEBUG SWS RAW:{len(df[df.second_wind_setup])}")
-    
-    # =========================
-    # SECOND WIND WATCH
-    # =========================
-    msg.append("")
-    msg.append("🌊👀 SECOND WIND WATCH")
-
-    sw_watch_sorted = sw_watch.sort_values("score", ascending=False).head(4)
-
-    if len(sw_watch_sorted):
-        for _, row in sw_watch_sorted.iterrows():
-            msg.append(
-                f"{row.ticker} "
-                f"S:{row.score:.2f} "
-                f"Ext:{row.ext:.2f}"
-            )
-    else:
-        msg.append("None")
-
-    # =========================
-    # SECOND WIND SETUP
-    # =========================
-    msg.append("")
-    msg.append("🌊🧩 SECOND WIND SETUP")
-
-    sw_setup_sorted = sw_setup.sort_values("score", ascending=False).head(4)
-
-    if len(sw_setup_sorted):
-        for _, row in sw_setup_sorted.iterrows():
-            msg.append(
-                f"{row.ticker} "
-                f"S:{row.score:.2f} "
-                f"Ext:{row.ext:.2f}"
-            )
-    else:
-        msg.append("None")
-
-    # =========================
-    # SECOND WIND TRIGGER
-    # =========================
-    msg.append("")
-    msg.append("🌊🔥 SECOND WIND TRIGGER")
-
-    sw_trigger = (
-        df[df.second_wind_trigger]
-        .sort_values("score", ascending=False)
-        .head(4)
-    )
-
-    if len(sw_trigger):
-        for _, row in sw_trigger.iterrows():
-            msg.append(
-                f"{row.ticker} "
-                f"S:{row.score:.2f} "
-                f"Ext:{row.ext:.2f}"
-            )
+    if len(prime):
+        for _, row in prime.iterrows():
+            msg.append(f"{row.ticker} S:{row.score:.2f} LT:{row.long_term_bonus:.2f}")
     else:
         msg.append("None")
 
@@ -620,14 +427,10 @@ def run():
     results = []
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = {
-            ex.submit(fetch, session, t): t
-            for t in universe
-        }
+        futures = {ex.submit(fetch, session, t): t for t in universe}
 
         for f in as_completed(futures):
             rlt = f.result()
-
             if rlt:
                 results.append(rlt)
 
@@ -642,13 +445,7 @@ def run():
     print(text)
 
     if WEBHOOK_URL:
-        requests.post(
-            WEBHOOK_URL,
-            json={"content": text[:1900]}
-        )
+        requests.post(WEBHOOK_URL, json={"content": text[:1900]})
 
-# =========================
-# MAIN
-# =========================
 if __name__ == "__main__":
     run()
