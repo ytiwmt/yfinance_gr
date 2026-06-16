@@ -349,7 +349,7 @@ def fetch(session, ticker):
         prime_window = (
             second_wind_setup and
             base_score > 1.0 and
-            yearly_trend_factor > 0
+            yearly_trend_factor >= 0.25
         )
         # ---------------------------------------------------------
 
