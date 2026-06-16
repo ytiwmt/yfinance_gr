@@ -300,7 +300,7 @@ def fetch(session, ticker):
         second_wind_setup = (
             second_wind_watch and
             extension < 3 and
-            delta > -0.15 and
+            delta > -0.15
         )
 
         # SWT (Second Wind Trigger)
