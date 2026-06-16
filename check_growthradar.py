@@ -286,33 +286,8 @@ def fetch(session, ticker):
             ext_penalty = 0.5
 
         # =========================
-        # SECOND WIND
-        # =========================
-        second_wind_watch = (
-            recent_high_streak >= 3 and
-            streak <= 4 and
-            phase in ["TRANSITION", "CONT", "EARLY"] and
-            extension < 5.0 and
-            delta > -0.3
-        )
-
-        # SWS (Second Wind Setup)
-        second_wind_setup = (
-            second_wind_watch and
-            extension < 3 and
-            delta > -0.15
-        )
-
-        # SWT (Second Wind Trigger)
-        second_wind_trigger = (
-            second_wind_setup and
-            breakout and
-            yearly_trend_factor > 0
-        )
-
-        # ---------------------------------------------------------
         # LONG TERM TREND VALIDATION MODEL
-        # ---------------------------------------------------------
+        # =========================
         idx_252d = max(-len(close), -252)
         price_252d_ago = close[idx_252d]
         yearly_return = (price / price_252d_ago) - 1 if price_252d_ago else 0
@@ -329,9 +304,38 @@ def fetch(session, ticker):
         else:
             yearly_trend_factor = 0.0
 
+        # =========================
+        # SECOND WIND (UPDATE v40.20)
+        # =========================
+        second_wind_watch = (
+            recent_high_streak >= 3 and
+            streak <= 4 and
+            phase in ["TRANSITION", "CONT", "EARLY"] and
+            extension < 5.0 and
+            delta > -0.3
+        )
+
+        second_wind_setup = (
+            second_wind_watch and
+            extension < 3 and
+            delta > -0.15
+        )
+
+        second_wind_trigger = (
+            second_wind_setup and
+            breakout
+        )
+
+        second_wind_quality = (
+            0.6 + 0.4 * yearly_trend_factor
+        )
+
         second_wind_bonus = 0.0
         if second_wind_setup:
-            second_wind_bonus = 0.75 * yearly_trend_factor
+            second_wind_bonus = (
+                0.75 *
+                second_wind_quality
+            )
         # ---------------------------------------------------------
 
         # NEW: SWS発火ログの保存（後からの検証用）
@@ -359,12 +363,6 @@ def fetch(session, ticker):
             long_term_bonus -
             ext_penalty
         )
-
-        # ---------------------------------------------------------
-        # UPDATE v40.18: ADD YEARLY TREND FACTOR TO FINAL SCORE
-        # ---------------------------------------------------------
-        score += yearly_trend_factor
-        # ---------------------------------------------------------
 
         score = round(float(score), 2)
 
@@ -421,6 +419,17 @@ def build_buy(df):
         ext_penalty
     )
 
+    # ---------------------------------------------------------
+    # UPDATE v40.20: FILTER LONG TERM DOWNWARD TRENDS FROM BUY RANKING
+    # ---------------------------------------------------------
+    buy = buy[
+        ~(
+            (buy["second_wind_setup"]) &
+            (buy["long_term_bonus"] == 0)
+        )
+    ]
+    # ---------------------------------------------------------
+
     buy = buy.sort_values(
         "buy_score",
         ascending=False
@@ -446,8 +455,8 @@ def build_message(df):
 
     msg = []
 
-    # UPDATE v40.18: バージョン名の変更
-    msg.append("🚀 GrowthRadar v40.19 (SECOND WIND TREND GATE MODEL)") 
+    # UPDATE v40.20: バージョン名の変更
+    msg.append("🚀 GrowthRadar v40.20 (SOFT SECOND WIND RANK MODEL)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
