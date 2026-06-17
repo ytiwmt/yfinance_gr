@@ -343,6 +343,16 @@ def fetch(session, ticker):
                 second_wind_quality
             )
 
+        # ---------------------------------------------------------
+        # UPDATE v41.0: PRIME WINDOW DETERMINATION
+        # ---------------------------------------------------------
+        prime_window = (
+            second_wind_setup and
+            base_score > 1.0 and
+            yearly_trend_factor >= 0.25
+        )
+        # ---------------------------------------------------------
+
         # NEW: SWS発火ログの保存（後からの検証用）
         if r:
             r.set(
@@ -386,8 +396,8 @@ def fetch(session, ticker):
             
             "long_term_bonus": round(long_term_bonus, 2),
             
-            # 💡パーセンタイル計算用にプレースホルダーを定義
-            "prime_window": False,
+            # UPDATE v41.0
+            "prime_window": bool(prime_window),
             "yearly_trend_factor": yearly_trend_factor
         }
 
@@ -470,8 +480,8 @@ def build_message(df):
 
     msg = []
 
-    # 💡UPDATE v41.0: バージョン名の変更
-    msg.append("🚀 GrowthRadar v41.0 (PRIME WINDOW READJUSTED MODEL)") 
+    # UPDATE v41.0: バージョン名の変更
+    msg.append("🚀 GrowthRadar v41.0 (PRIME WINDOW MODEL)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -668,18 +678,6 @@ def run():
         return
 
     df = pd.DataFrame(results)
-
-    # ---------------------------------------------------------
-    # 💡UPDATE v41.0: CROSS-SECTIONAL RANK & PRIME WINDOW RECALC
-    # ---------------------------------------------------------
-    buy_rank = df["score"].rank(pct=True)
-
-    df["prime_window"] = (
-        (df["second_wind_setup"]) & 
-        (buy_rank >= 0.8) & 
-        (df["yearly_trend_factor"] >= 0.25)
-    )
-    # ---------------------------------------------------------
 
     text = build_message(df)
 
