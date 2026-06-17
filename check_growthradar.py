@@ -348,7 +348,7 @@ def fetch(session, ticker):
         # ---------------------------------------------------------
         prime_window = (
             second_wind_setup and
-            base_score > 1.0 and
+            buy_score > BUY_CUTOFF and
             yearly_trend_factor > 0
         )
         # ---------------------------------------------------------
@@ -481,7 +481,7 @@ def build_message(df):
     msg = []
 
     # UPDATE v41.0: バージョン名の変更
-    msg.append("🚀 GrowthRadar v41.0 (PRIME WINDOW MODEL)") 
+    msg.append("🚀 GrowthRadar v41.2 (PRIME CONFLUENCE MODEL)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
