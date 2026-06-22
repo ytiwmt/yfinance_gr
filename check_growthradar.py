@@ -420,7 +420,6 @@ def fetch(session, ticker):
 # BUY
 # =========================
 def build_buy(df):
-    # 💡UPDATE v41.12: 先頭でdfのコピーと、危険なmap(bool)を回避した"boolean"型への安全固定を追加
     buy = df.copy()
 
     for col in [
@@ -469,7 +468,7 @@ def build_buy(df):
         buy["prime_bonus"]
     )
 
-    # 💡UPDATE v41.12: boolean型への統一に伴い、明示的な == True 評価へ安全化
+    # UPDATE v41.12: boolean型への統一に伴い、明示的な == True 評価へ安全化
     buy = buy[
         ~(
             (buy["second_wind_setup"] == True) &
@@ -488,11 +487,30 @@ def build_buy(df):
 # MESSAGE
 # =========================
 def build_message(df):
+    # 💡UPDATE v41.19: build_message先頭部への型固定の追加
+    df = df.copy()
+
+    bool_cols = [
+        "breakout",
+        "second_wind_watch",
+        "second_wind_setup",
+        "second_wind_trigger",
+        "prime_window"
+    ]
+
+    for col in bool_cols:
+        if col in df:
+            df[col] = (
+                df[col]
+                .fillna(False)
+                .astype(bool)
+            )
+
     buy = build_buy(df)
 
-    # ターゲットリストを抽出
-    sw_watch = df[df.second_wind_watch]
-    sw_setup = df[df.second_wind_setup]
+    # 💡UPDATE v41.19: ターゲットリストの抽出条件を df["col"] == True に全面一括置換
+    sw_watch = df[df["second_wind_watch"] == True]
+    sw_setup = df[df["second_wind_setup"] == True]
 
     # NEW: “調整判断フラグ”の評価（スコープへの定義）
     sws_adjust_signal = (
@@ -502,8 +520,8 @@ def build_message(df):
 
     msg = []
 
-    # 💡UPDATE v41.12: バージョン表示名の変更
-    msg.append("🚀 GrowthRadar v41.12") 
+    # 💡UPDATE v41.19: バージョン表示名の変更
+    msg.append("🚀 GrowthRadar v41.19") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -585,7 +603,8 @@ def build_message(df):
     msg.append("")
     msg.append("🌊 FIRST WAVE")
 
-    brk = df[df.breakout].head(4)
+    # 💡UPDATE v41.19: 置換箇所
+    brk = df[df["breakout"] == True].head(4)
 
     if len(brk):
         for _, row in brk.iterrows():
@@ -595,8 +614,9 @@ def build_message(df):
         
     # DEBUG
     msg.append("")
-    msg.append(f"DEBUG SWW RAW:{len(df[df.second_wind_watch])}")
-    msg.append(f"DEBUG SWS RAW:{len(df[df.second_wind_setup])}")
+    # 💡UPDATE v41.19: 置換箇所
+    msg.append(f"DEBUG SWW RAW:{len(df[df['second_wind_watch'] == True])}")
+    msg.append(f"DEBUG SWS RAW:{len(df[df['second_wind_setup'] == True])}")
     
     # =========================
     # SECOND WIND WATCH
@@ -640,8 +660,9 @@ def build_message(df):
     msg.append("")
     msg.append("🌊🔥 SECOND WIND TRIGGER")
 
+    # 💡UPDATE v41.19: 置換箇所
     sw_trigger = (
-        df[df.second_wind_trigger]
+        df[df["second_wind_trigger"] == True]
         .sort_values("score", ascending=False)
         .head(4)
     )
@@ -662,7 +683,8 @@ def build_message(df):
     msg.append("")
     msg.append("👑 PRIME WINDOW")
 
-    prime = df[df.prime_window].sort_values("score", ascending=False).head(5)
+    # 💡UPDATE v41.19: 置換箇所
+    prime = df[df["prime_window"] == True].sort_values("score", ascending=False).head(5)
 
     if len(prime):
         for _, row in prime.iterrows():
@@ -678,8 +700,6 @@ def build_message(df):
 def run():
     session = requests.Session()
     session.headers.update(HEADERS)
-
-    # 💡UPDATE v41.12: キャッシュ削除要求に伴い、r.flushdb() 処理を完全に撤去
 
     print("--- START DIAL-IN SINGLE TEST (AAPL) ---")
     try:
