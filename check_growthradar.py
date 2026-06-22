@@ -2,8 +2,7 @@ import os
 import requests
 import random
 import re
-import redis
-import json  # NEW: sws_logのシリアライズ用に追加
+import json  # SWSログダンプ用プレースホルダーの維持
 import time  # v41.8: スロットリング用
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,7 +14,6 @@ import numpy as np
 # CONFIG
 # =========================
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
-REDIS_URL = os.environ.get("REDIS_URL")
 
 SCAN_SIZE = 1500
 MAX_WORKERS = 5  # v41.8: 4〜6の現実ライン
@@ -38,22 +36,6 @@ ETF_BLACKLIST = {
     "AMDL", "IONL", "NBIG", "MVLL",
     "SMH", "IGV", "BOTZ", "TAN"
 }
-
-# =========================
-# REDIS
-# =========================
-r = None
-
-if REDIS_URL:
-    try:
-        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
-        r.ping()
-        print("🟢 Redis: CONNECTED")
-    except:
-        print("🔴 Redis: FAILED")
-        r = None
-else:
-    print("⚠️ Redis: OFF")
 
 # =========================
 # UNIVERSE
@@ -97,6 +79,30 @@ def load_universe():
     return symbols[:SCAN_SIZE]
 
 # =========================
+# NEW INDEPENDENT CALCULATORS
+# =========================
+def calc_streak(close):
+    r = pd.Series(close).pct_change()
+    val = (r > 0).rolling(3).sum().iloc[-1]
+    return int(val) if not np.isnan(val) else 0
+
+def calc_high_streak(close):
+    r = pd.Series(close).pct_change()
+    streaks = (r > 0).astype(int)
+
+    max_streak = 0
+    current = 0
+
+    for x in streaks:
+        if x:
+            current += 1
+            max_streak = max(max_streak, current)
+        else:
+            current = 0
+
+    return int(max_streak)
+
+# =========================
 # FETCH
 # =========================
 def fetch(session, ticker):
@@ -129,8 +135,8 @@ def fetch(session, ticker):
         close = [x for x in close if x is not None]
         volume = [x for x in volume if x is not None]
 
-        # v41.8: 緩和値
-        if len(close) < 50:
+        # UPDATE v42.0: 修正①（必須） 時系列データ不足による指標計算クラッシュを完全防御
+        if len(close) < 200:
             return None
 
         price = close[-1]
@@ -227,74 +233,14 @@ def fetch(session, ticker):
         )
 
         # =========================
-        # REDIS TIME MODEL
+        # NEW STATELESS MODEL (v42.0)
         # =========================
-        delta = 0.0
-        streak = 0
+        delta = np.mean(close[-5:]) / np.mean(close[-20:-5]) - 1
+        if np.isnan(delta):
+            delta = 0.0
 
-        today = datetime.utcnow().strftime("%Y-%m-%d")
-
-        if r:
-            prev_score = r.get(f"score:{ticker}")
-            prev_streak = r.get(f"streak:{ticker}")
-            prev_day = r.get(f"day:{ticker}")
-
-            # NEW
-            recent_high_streak = r.get(f"highstreak:{ticker}")
-            recent_high_streak = int(recent_high_streak) if recent_high_streak else 0
-
-            # v41.10：Redis読込時に壊れ値を自動検知して削除
-            if prev_score is not None:
-                try:
-                    delta = base_score - float(prev_score)
-                except:
-                    r.delete(f"score:{ticker}")
-                    delta = 0.0
-            else:
-                delta = base_score - 0.0
-
-            if prev_streak is not None:
-                streak = int(prev_streak)
-
-            # =========================
-            # STREAK FIX
-            # =========================
-            if prev_day != today:
-
-                keep_signal = (
-                    phase in ["TRANSITION", "CONT"] and
-                    base_score > 0.9 and
-                    delta >= -0.15
-                )
-
-                if keep_signal:
-                    streak += 1
-                else:
-                    streak = 0
-
-            # =========================
-            # SAVE HIGHEST STREAK
-            # =========================
-            recent_high_streak = max(
-                recent_high_streak,
-                streak
-            )
-
-            # SAVE
-            # v41.10：Redis保存時に必ず標準型（float/int）化
-            r.set(f"score:{ticker}", float(base_score), ex=86400)
-            r.set(f"streak:{ticker}", int(streak), ex=86400 * 7)
-            r.set(f"day:{ticker}", today, ex=86400 * 7)
-
-            # NEW
-            r.set(
-                f"highstreak:{ticker}",
-                int(recent_high_streak),
-                ex=86400 * 14
-            )
-
-        else:
-            recent_high_streak = 0
+        streak = calc_streak(close)
+        recent_high_streak = calc_high_streak(close)
 
         # =========================
         # STREAK BONUS
@@ -332,26 +278,18 @@ def fetch(session, ticker):
             yearly_trend_factor = 0.0
 
         # =========================
-        # SECOND WIND
+        # SECOND WIND (v42.0)
         # =========================
-        second_wind_watch = (
-            recent_high_streak >= 3 and
-            streak <= 4 and
-            phase in ["TRANSITION", "CONT", "EARLY"] and
-            extension < 5.0 and
-            delta > -0.3
+        second_wind_base = (
+            m3 > 0.3 and
+            m1 > 0.15 and
+            vol_ratio > 1.5 and
+            extension < 5
         )
 
-        second_wind_setup = (
-            second_wind_watch and
-            extension < 3 and
-            delta > -0.15
-        )
-
-        second_wind_trigger = (
-            second_wind_setup and
-            breakout
-        )
+        second_wind_setup = second_wind_base
+        second_wind_watch = second_wind_base and (recent_high_streak >= 3)
+        second_wind_trigger = second_wind_setup and breakout
 
         second_wind_quality = (
             0.6 + 0.4 * yearly_trend_factor
@@ -362,20 +300,6 @@ def fetch(session, ticker):
             second_wind_bonus = (
                 0.75 *
                 second_wind_quality
-            )
-
-        # NEW: SWS発火ログの保存（後からの検証用）
-        if r:
-            r.set(
-                f"sws_log:{ticker}:{today}",
-                json.dumps({
-                    "extension": extension,
-                    "streak": streak,
-                    "delta": delta,
-                    "phase": phase,
-                    "hit": bool(second_wind_setup)
-                }),
-                ex=86400 * 14
             )
 
         # =========================
@@ -422,19 +346,17 @@ def fetch(session, ticker):
 def build_buy(df):
     buy = df.copy()
 
+    # 💡UPDATE v42.0: 危険な "boolean" 型キャストを廃止し、安全なネイティブ bool キャストへ修正
     for col in [
         "second_wind_watch",
         "second_wind_setup",
         "second_wind_trigger",
         "prime_window"
     ]:
-        buy[col] = (
-            buy[col]
-            .fillna(False)
-            .astype("boolean")
-        )
+        buy[col] = buy[col].fillna(False).astype(bool)
 
-    df = df.astype(float, errors="ignore")
+    # 💡UPDATE v42.0: column崩壊の原因となっていた `df = df.astype(float, errors="ignore")` を完全削除。
+    # すでに run() 側で数値列 (num_cols) のみの安全キャストを行っているため、ここでの処理は不要です。
 
     structure_bonus = (
         (buy["phase"] == "TRANSITION") * 0.7 +
@@ -487,7 +409,7 @@ def build_buy(df):
 # MESSAGE
 # =========================
 def build_message(df):
-    # 💡UPDATE v41.19: build_message先頭部への型固定の追加
+    # UPDATE v41.19: build_message先頭部への型固定の追加
     df = df.copy()
 
     bool_cols = [
@@ -508,7 +430,7 @@ def build_message(df):
 
     buy = build_buy(df)
 
-    # 💡UPDATE v41.19: ターゲットリストの抽出条件を df["col"] == True に全面一括置換
+    # UPDATE v41.19: ターゲットリストの抽出条件を df["col"] == True に全面一括置換
     sw_watch = df[df["second_wind_watch"] == True]
     sw_setup = df[df["second_wind_setup"] == True]
 
@@ -520,11 +442,11 @@ def build_message(df):
 
     msg = []
 
-    # 💡UPDATE v41.19: バージョン表示名の変更
-    msg.append("🚀 GrowthRadar v41.19") 
+    # UPDATE v42.0: バージョン表示名の変更
+    msg.append("🚀 GrowthRadar v42.0") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
+    msg.append("⚠️ Redis: OFF (Stateless Mode)")
 
     msg.append("")
     msg.append("💎 BUY SIGNAL")
@@ -603,7 +525,7 @@ def build_message(df):
     msg.append("")
     msg.append("🌊 FIRST WAVE")
 
-    # 💡UPDATE v41.19: 置換箇所
+    # UPDATE v41.19: 置換箇所
     brk = df[df["breakout"] == True].head(4)
 
     if len(brk):
@@ -614,7 +536,7 @@ def build_message(df):
         
     # DEBUG
     msg.append("")
-    # 💡UPDATE v41.19: 置換箇所
+    # UPDATE v41.19: 置換箇所
     msg.append(f"DEBUG SWW RAW:{len(df[df['second_wind_watch'] == True])}")
     msg.append(f"DEBUG SWS RAW:{len(df[df['second_wind_setup'] == True])}")
     
@@ -660,7 +582,7 @@ def build_message(df):
     msg.append("")
     msg.append("🌊🔥 SECOND WIND TRIGGER")
 
-    # 💡UPDATE v41.19: 置換箇所
+    # UPDATE v41.19: 置換箇所
     sw_trigger = (
         df[df["second_wind_trigger"] == True]
         .sort_values("score", ascending=False)
@@ -683,7 +605,7 @@ def build_message(df):
     msg.append("")
     msg.append("👑 PRIME WINDOW")
 
-    # 💡UPDATE v41.19: 置換箇所
+    # UPDATE v41.19: 置換箇所
     prime = df[df["prime_window"] == True].sort_values("score", ascending=False).head(5)
 
     if len(prime):
@@ -735,35 +657,21 @@ def run():
 
     df = pd.DataFrame(results)
 
-    for col in df.columns:
-        try:
-            df[col] = df[col].apply(lambda x: float(x) if isinstance(x, (int, float, np.number)) else x)
-        except:
-            pass
+    # UPDATE v42.0: ブール列への上書き汚染を避けるため、対象の数値列のみに限定して一括安全キャスト
+    num_cols = ["score", "ext", "long_term_bonus", "streak", "yearly_trend_factor"]
+    for c in num_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-    # UPDATE v41.0: CROSS-SECTIONAL RANK & PRIME WINDOW RECALC
-    buy_rank = df["score"].rank(pct=True)
+    # UPDATE v42.0: 修正③（必須） ランキング算出時、NaNによるクラッシュを防ぐために明示的防衛
+    buy_rank = df["score"].rank(pct=True).fillna(0)
 
-    # v41.11：SWSフラグの真偽値固定
-    df["second_wind_setup"] = (
-        df["second_wind_setup"]
-        .fillna(False)
-        .astype(bool)
-    )
+    # UPDATE v42.0: 修正②（必須） SWS関連フラグの完全な bool 固定
+    df["second_wind_setup"] = df["second_wind_setup"].astype(bool)
+    df["second_wind_watch"] = df["second_wind_watch"].astype(bool)
+    df["second_wind_trigger"] = df["second_wind_trigger"].astype(bool)
 
-    df["second_wind_watch"] = (
-        df["second_wind_watch"]
-        .fillna(False)
-        .astype(bool)
-    )
-
-    df["second_wind_trigger"] = (
-        df["second_wind_trigger"]
-        .fillna(False)
-        .astype(bool)
-    )
-
-    # v41.11：prime_window条件式の明示的評価化
+    # UPDATE v42.0: yearly_trend_factorの完全数値化保証により、ここでの型混入クラッシュを完璧にブロック
     df["prime_window"] = (
         (df["second_wind_setup"] == True) & 
         (buy_rank >= 0.8) & 
