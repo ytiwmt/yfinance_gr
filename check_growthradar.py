@@ -278,19 +278,29 @@ def fetch(session, ticker):
             yearly_trend_factor = 0.0
 
         # =========================
-        # SECOND WIND (v42.1改)
+        # SECOND WIND (v42.2)
         # =========================
-        # 💡UPDATE v42.1: ② SECOND WINDの形状判定基準をさらに厳格化
-        second_wind_base = (
-            m3 > 0.45 and
-            m1 > 0.25 and
-            vol_ratio > 1.8 and
-            extension < 3.5
+        # 💡UPDATE v42.2: ① WATCH（異常検知：「形が出始め」）
+        second_wind_watch = (
+            m3 > 0.2 and
+            vol_ratio > 1.3 and
+            extension < 7
         )
 
-        second_wind_setup = second_wind_base
-        second_wind_watch = second_wind_base and (recent_high_streak >= 3)
-        second_wind_trigger = second_wind_setup and breakout
+        # 💡UPDATE v42.2: ② SETUP（収束：「再加速の準備」）※WATCHを継承
+        second_wind_setup = (
+            second_wind_watch and
+            recent_high_streak >= 3 and
+            extension < 4 and
+            delta > -0.1
+        )
+
+        # 💡UPDATE v42.2: ③ TRIGGER（発火：「実際の再上昇」）※SETUPを継承
+        second_wind_trigger = (
+            second_wind_setup and
+            breakout and
+            m1 > 0.25
+        )
 
         second_wind_quality = (
             0.6 + 0.4 * yearly_trend_factor
@@ -439,8 +449,8 @@ def build_message(df):
 
     msg = []
 
-    # UPDATE v42.1: バージョン表示名の変更
-    msg.append("🚀 GrowthRadar v42.1") 
+    # 💡UPDATE v42.2: バージョン表示名の変更
+    msg.append("🚀 GrowthRadar v42.2") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("⚠️ Redis: OFF (Stateless Mode)")
@@ -660,7 +670,7 @@ def run():
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-    # 💡UPDATE v42.1: ④ 銘柄数制御を追加（ノイズ過多・無限増殖の抑止として上位300件にクリップ）
+    # UPDATE v42.1: ④ 銘柄数制御を追加（ノイズ過多・無限増殖の抑止として上位300件にクリップ）
     df = df.sort_values("score", ascending=False).head(300)
 
     # UPDATE v42.0: 修正③（必須） ランキング算出時、NaNによるクラッシュを防ぐために明示的防衛
@@ -673,7 +683,7 @@ def run():
     df["second_wind_trigger"] = df["second_wind_trigger"].astype(bool)
     df["breakout"] = df["breakout"].astype(bool)
 
-    # 💡UPDATE v42.1: ① & ③ PRIME WINDOW判定の再設計（強い + 上位のAND結合、およびbreakout/triggerの強制連動化）
+    # 💡UPDATE v42.2: 新しい cascaded 条件を適用した PRIME WINDOW 最終判定
     df["prime_window"] = (
         (df["second_wind_trigger"] == True) & 
         (df["breakout"] == True) & 
