@@ -243,8 +243,15 @@ def fetch(session, ticker):
             recent_high_streak = r.get(f"highstreak:{ticker}")
             recent_high_streak = int(recent_high_streak) if recent_high_streak else 0
 
-            # 💡UPDATE v41.9: ④ Redis deltaの安全化（or 0 によるNone回避）
-            delta = base_score - float(prev_score or 0)
+            # 💡UPDATE v41.10：② Redis読込時に壊れ値を自動検知して削除（自己修復機構）
+            if prev_score is not None:
+                try:
+                    delta = base_score - float(prev_score)
+                except:
+                    r.delete(f"score:{ticker}")
+                    delta = 0.0
+            else:
+                delta = base_score - 0.0
 
             if prev_streak is not None:
                 streak = int(prev_streak)
@@ -274,14 +281,15 @@ def fetch(session, ticker):
             )
 
             # SAVE
-            r.set(f"score:{ticker}", base_score, ex=86400)
-            r.set(f"streak:{ticker}", streak, ex=86400 * 7)
+            # 💡UPDATE v41.10：① Redis保存時に必ず標準型（float/int）化してデータ汚染を鉄壁防御
+            r.set(f"score:{ticker}", float(base_score), ex=86400)
+            r.set(f"streak:{ticker}", int(streak), ex=86400 * 7)
             r.set(f"day:{ticker}", today, ex=86400 * 7)
 
             # NEW
             r.set(
                 f"highstreak:{ticker}",
-                recent_high_streak,
+                int(recent_high_streak),
                 ex=86400 * 14
             )
 
@@ -384,7 +392,6 @@ def fetch(session, ticker):
 
         score = round(float(score), 2)
 
-        # 💡UPDATE v41.9: ③ fetch側のreturn値を完全に標準float化
         return {
             "ticker": ticker,
             "phase": phase,
@@ -413,7 +420,6 @@ def fetch(session, ticker):
 # BUY
 # =========================
 def build_buy(df):
-    # 💡UPDATE v41.9: ② build_buy直前での型再保証（errors="ignore"で非数値列を退避）
     df = df.astype(float, errors="ignore")
 
     buy = df.copy()
@@ -483,8 +489,8 @@ def build_message(df):
 
     msg = []
 
-    # 💡UPDATE v41.9: バージョン表示名の変更
-    msg.append("🚀 GrowthRadar v41.9") 
+    # 💡UPDATE v41.10: バージョン表示名の変更
+    msg.append("🚀 GrowthRadar v41.10") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -660,6 +666,15 @@ def run():
     session = requests.Session()
     session.headers.update(HEADERS)
 
+    # 💡UPDATE v41.10：③ GrowthRadar専用ストレージを一発で全クリアするクリーンアップ実行
+    if r:
+        print("🧹 Redis execution: r.flushdb()")
+        try:
+            r.flushdb()
+            print("🟢 Redis: FLUSHDB SUCCESS")
+        except Exception as flush_err:
+            print("🔴 Redis: FLUSHDB FAILED", flush_err)
+
     print("--- START DIAL-IN SINGLE TEST (AAPL) ---")
     try:
         test_url = "https://query1.finance.yahoo.com/v8/finance/chart/AAPL?range=1y&interval=1d"
@@ -694,7 +709,6 @@ def run():
 
     df = pd.DataFrame(results)
 
-    # 💡UPDATE v41.9: ① DataFrame生成直後の全列一括クレンジング
     for col in df.columns:
         try:
             df[col] = df[col].apply(lambda x: float(x) if isinstance(x, (int, float, np.number)) else x)
