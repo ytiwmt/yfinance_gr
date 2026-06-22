@@ -4,7 +4,7 @@ import random
 import re
 import redis
 import json  # NEW: sws_logのシリアライズ用に追加
-import time  # v41.6: スロットリング用
+import time  # ④ sleep変更用
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -18,10 +18,10 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
 REDIS_URL = os.environ.get("REDIS_URL")
 
 SCAN_SIZE = 1500
-MAX_WORKERS = 2  # v41.6: rate limit対策
+MAX_WORKERS = 5  # 💡UPDATE v41.6: ⑥ 現実ラインの 4〜6 に引き上げ（5を選択）
 
 MIN_PRICE = 5.0
-MIN_VOL = 300000
+MIN_VOL = 100000  # 💡UPDATE v41.8: ① 出来高制限を緩和（300000 -> 100000）
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0"
@@ -38,19 +38,6 @@ ETF_BLACKLIST = {
     "AMDL", "IONL", "NBIG", "MVLL",
     "SMH", "IGV", "BOTZ", "TAN"
 }
-
-# =========================
-# 💡UPDATE v41.7: ① safe_float 関数の定義
-# =========================
-def safe_float(x):
-    if isinstance(x, (int, float, np.number)):
-        return float(x)
-    if x is None:
-        return 0.0
-    try:
-        return float(str(x).replace("np.float64(", "").replace(")", ""))
-    except:
-        return 0.0
 
 # =========================
 # REDIS
@@ -114,8 +101,8 @@ def load_universe():
 # =========================
 def fetch(session, ticker):
     try:
-        # v41.6: rate limit対策
-        time.sleep(0.2)
+        # 💡UPDATE v41.8: ④ sleepを戻す（0.2 -> 0.05）
+        time.sleep(0.05)
 
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1y&interval=1d"
 
@@ -130,10 +117,7 @@ def fetch(session, ticker):
             print(ticker, "STATUS", res.status_code)
             return None
 
-        # v41.6: JSON安全チェック
-        if "chart" not in res.text:
-            print(ticker, "BAD RESPONSE")
-            return None
+        # 💡UPDATE v41.8: ⑤ 誤爆の多い JSON（"chart"）ガードを削除
 
         data = res.json()["chart"]["result"][0]
 
@@ -147,7 +131,8 @@ def fetch(session, ticker):
         close = [x for x in close if x is not None]
         volume = [x for x in volume if x is not None]
 
-        if len(close) < 70:
+        # 💡UPDATE v41.8: ② 上場期間の制限を緩和（70 -> 50）
+        if len(close) < 50:
             return None
 
         price = close[-1]
@@ -260,9 +245,9 @@ def fetch(session, ticker):
             recent_high_streak = r.get(f"highstreak:{ticker}")
             recent_high_streak = int(recent_high_streak) if recent_high_streak else 0
 
-            # 💡UPDATE v41.7: ② Redis取得値の安全な型キャスト
+            # 💡UPDATE v41.8: ③ safe_floatを削除し、通常のfloatへ復元
             if prev_score is not None:
-                delta = base_score - safe_float(prev_score)
+                delta = base_score - float(prev_score)
 
             if prev_streak is not None:
                 streak = int(prev_streak)
@@ -400,8 +385,8 @@ def fetch(session, ticker):
             ext_penalty
         )
 
-        # 💡UPDATE v41.7: 返却直前でsafe_floatを適用し型を完全担保
-        score = safe_float(round(float(score), 2))
+        # 💡UPDATE v41.8: ③ safe_floatを削除
+        score = round(float(score), 2)
 
         return {
             "ticker": ticker,
@@ -409,14 +394,14 @@ def fetch(session, ticker):
             "score": score,
             "streak": int(streak),
             "breakout": bool(breakout),
-            "ext": safe_float(round(float(extension), 2)),
+            "ext": round(float(extension), 2),
 
             # NEW
             "second_wind_watch": bool(second_wind_watch),
             "second_wind_setup": bool(second_wind_setup),
             "second_wind_trigger": bool(second_wind_trigger),
             
-            "long_term_bonus": safe_float(round(long_term_bonus, 2)),
+            "long_term_bonus": round(long_term_bonus, 2),
             
             # パーセンタイル計算用にプレースホルダーを定義
             "prime_window": False,
@@ -424,7 +409,6 @@ def fetch(session, ticker):
         }
 
     except Exception as e:
-        # v41.6: 原因特定用エラーログ
         print(ticker, "ERROR:", e)
         return None
 
@@ -499,8 +483,8 @@ def build_message(df):
 
     msg = []
 
-    # 💡UPDATE v41.7: バージョン表示名の変更
-    msg.append("🚀 GrowthRadar v41.7 (CAST SAFE MODEL)") 
+    # 💡UPDATE v41.8: バージョン表示名の変更
+    msg.append("🚀 GrowthRadar v41.8") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -710,10 +694,7 @@ def run():
 
     df = pd.DataFrame(results)
 
-    # 💡UPDATE v41.7: ③ 各列データに対する safe_float の一括バインド適用
-    df["score"] = df["score"].apply(safe_float)
-    df["ext"] = df["ext"].apply(safe_float)
-    df["long_term_bonus"] = df["long_term_bonus"].apply(safe_float)
+    # 💡UPDATE v41.8: ③ safe_floatを適用していた列一括処理部分を削除
 
     # UPDATE v41.0: CROSS-SECTIONAL RANK & PRIME WINDOW RECALC
     buy_rank = df["score"].rank(pct=True)
