@@ -420,9 +420,22 @@ def fetch(session, ticker):
 # BUY
 # =========================
 def build_buy(df):
-    df = df.astype(float, errors="ignore")
-
+    # 💡UPDATE v41.12: 先頭でdfのコピーと、危険なmap(bool)を回避した"boolean"型への安全固定を追加
     buy = df.copy()
+
+    for col in [
+        "second_wind_watch",
+        "second_wind_setup",
+        "second_wind_trigger",
+        "prime_window"
+    ]:
+        buy[col] = (
+            buy[col]
+            .fillna(False)
+            .astype("boolean")
+        )
+
+    df = df.astype(float, errors="ignore")
 
     structure_bonus = (
         (buy["phase"] == "TRANSITION") * 0.7 +
@@ -456,10 +469,10 @@ def build_buy(df):
         buy["prime_bonus"]
     )
 
-    # UPDATE v41.0: FILTER OUT YEARLY TREND FACTOR == 0 FROM SWS
+    # 💡UPDATE v41.12: boolean型への統一に伴い、明示的な == True 評価へ安全化
     buy = buy[
         ~(
-            (buy["second_wind_setup"]) &
+            (buy["second_wind_setup"] == True) &
             (buy["yearly_trend_factor"] == 0)
         )
     ]
@@ -489,8 +502,8 @@ def build_message(df):
 
     msg = []
 
-    # 💡UPDATE v41.11: バージョン表示名の変更
-    msg.append("🚀 GrowthRadar v41.11") 
+    # 💡UPDATE v41.12: バージョン表示名の変更
+    msg.append("🚀 GrowthRadar v41.12") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -666,14 +679,7 @@ def run():
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    # v41.10：GrowthRadar専用ストレージ全クリア
-    if r:
-        print("🧹 Redis execution: r.flushdb()")
-        try:
-            r.flushdb()
-            print("🟢 Redis: FLUSHDB SUCCESS")
-        except Exception as flush_err:
-            print("🔴 Redis: FLUSHDB FAILED", flush_err)
+    # 💡UPDATE v41.12: キャッシュ削除要求に伴い、r.flushdb() 処理を完全に撤去
 
     print("--- START DIAL-IN SINGLE TEST (AAPL) ---")
     try:
@@ -715,12 +721,10 @@ def run():
         except:
             pass
 
-    # 💡UPDATE v41.11：修正② 重複かつ不要になったsafe_floatの個別一括適用を完全に削除
-
     # UPDATE v41.0: CROSS-SECTIONAL RANK & PRIME WINDOW RECALC
     buy_rank = df["score"].rank(pct=True)
 
-    # 💡UPDATE v41.11：修正① build_message(df) の前にSWSフラグの型を完全に真偽値（bool）固定
+    # v41.11：SWSフラグの真偽値固定
     df["second_wind_setup"] = (
         df["second_wind_setup"]
         .fillna(False)
@@ -739,7 +743,7 @@ def run():
         .astype(bool)
     )
 
-    # 💡UPDATE v41.11：修正③ prime_window条件式の明示的評価（== True）化による完全防衛
+    # v41.11：prime_window条件式の明示的評価化
     df["prime_window"] = (
         (df["second_wind_setup"] == True) & 
         (buy_rank >= 0.8) & 
