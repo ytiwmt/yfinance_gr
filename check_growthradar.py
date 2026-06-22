@@ -278,12 +278,10 @@ def fetch(session, ticker):
             yearly_trend_factor = 0.0
 
         # =========================
-        # SECOND WIND (v43.0 本質的定義へのリファクタリング)
+        # SECOND WIND (v43.0に基づく時間構造)
         # =========================
-        # 💡UPDATE v43.0: ② 時間構造（過去トレンド履歴の存在）
         trend_history = (m3 > 0.5)
 
-        # 💡UPDATE v43.0: ① 定義修正（breakout非依存化・過去トレンド×圧縮×ボリ再始動）
         second_wind_setup = (
             m3 > 0.6 and
             extension < 2.5 and
@@ -391,22 +389,27 @@ def build_buy(df):
         ext_penalty
     )
 
-    # 💡UPDATE v43.0: ③ PWの正しい定義（BUY × SW の交差マスク生成）
-    sw_score = (
-        buy["second_wind_setup"].astype(int) * 0.6 +
+    # 💡UPDATE v43.1: ① SWを“スコア化”する
+    buy["sw_score"] = (
+        buy["second_wind_setup"].astype(int) * 0.5 +
         buy["second_wind_watch"].astype(int) * 0.3 +
-        buy["second_wind_trigger"].astype(int) * 1.0
+        buy["second_wind_trigger"].astype(int) * 1.2
     )
 
-    pw_mask = (
-        (buy["buy_score"] > buy["buy_score"].quantile(0.7)) &
-        (sw_score > 0.5)
+    # 💡UPDATE v43.1: ② SWを「上位だけ(上位15%)」に制限
+    sw_threshold = buy["sw_score"].quantile(0.85)
+    buy["sw_active"] = buy["sw_score"] >= sw_threshold
+
+    # 💡UPDATE v43.1: ③ PWは“交差＋上位制限(上位25%)”に変更
+    buy_top = buy["buy_score"].quantile(0.75)
+    buy["prime_window"] = (
+        (buy["buy_score"] >= buy_top) &
+        (buy["sw_active"] == True)
     )
-    
-    buy["prime_window"] = pw_mask
+
     buy["prime_bonus"] = buy["prime_window"] * 1.0
     
-    # PRIME WINDOW対象には改めてボーナスを加算して最終buy_scoreを確定
+    # PRIME WINDOW対象には最終的なスコア底上げボーナスを適用
     buy["buy_score"] = buy["buy_score"] + buy["prime_bonus"]
 
     # UPDATE v41.12: 安全化
@@ -430,7 +433,6 @@ def build_buy(df):
 def build_message(df):
     df = df.copy()
 
-    # buy側で算出された最終的なprime_windowとbuy_scoreの伝播を受けるためbuild_buyを先行評価
     processed_df = build_buy(df)
     buy_top = processed_df.head(5)
 
@@ -439,8 +441,8 @@ def build_message(df):
 
     msg = []
 
-    # 💡UPDATE v43.0: バージョン表記更新
-    msg.append("🚀 GrowthRadar v43.0") 
+    # 💡UPDATE v43.1: バージョン表記更新
+    msg.append("🚀 GrowthRadar v43.1") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("⚠️ Redis: OFF (Stateless Mode)")
@@ -649,7 +651,7 @@ def run():
 
     df = pd.DataFrame(results)
 
-    # UPDATE v42.0: ブール列への上書き汚染を避けるため一括安全キャスト
+    # UPDATE v42.0: 数値列のみに限定してキャスト
     num_cols = ["score", "ext", "long_term_bonus", "streak", "yearly_trend_factor"]
     for c in num_cols:
         if c in df.columns:
@@ -658,13 +660,11 @@ def run():
     # 銘柄数制御（ノイズ過多・無限増殖の抑止として上位300件にクリップ）
     df = df.sort_values("score", ascending=False).head(300)
 
-    # 修正②: 各フラグの完全な bool 固定
     df["second_wind_setup"] = df["second_wind_setup"].astype(bool)
     df["second_wind_watch"] = df["second_wind_watch"].astype(bool)
     df["second_wind_trigger"] = df["second_wind_trigger"].astype(bool)
     df["breakout"] = df["breakout"].astype(bool)
 
-    # 💡UPDATE v43.0: PRIME WINDOW判定およびメッセージの生成は、交差条件を扱うためbuild_message内部(およびbuild_buy)に完全移管
     text = build_message(df)
 
     print(text)
