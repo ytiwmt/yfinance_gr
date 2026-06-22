@@ -4,7 +4,7 @@ import random
 import re
 import redis
 import json  # NEW: sws_logのシリアライズ用に追加
-import time  # 💡UPDATE v41.3: スロットリング用に追加
+import time  # UPDATE v41.3: スロットリング用に追加
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -18,7 +18,7 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
 REDIS_URL = os.environ.get("REDIS_URL")
 
 SCAN_SIZE = 1500
-MAX_WORKERS = 4  # 💡UPDATE v41.3: 12 -> 4 へ引き下げ
+MAX_WORKERS = 4  # UPDATE v41.3: 12 -> 4 へ引き下げ
 
 MIN_PRICE = 5.0
 MIN_VOL = 300000
@@ -101,19 +101,21 @@ def load_universe():
 # =========================
 def fetch(session, ticker):
     try:
-        # 💡UPDATE v41.3: スロットリングの挿入
+        # UPDATE v41.3: スロットリングの挿入
         time.sleep(0.05)
 
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1y&interval=1d"
 
-        # 💡UPDATE v41.3: 最大2回のリトライ機構
+        # UPDATE v41.3: 最大2回のリトライ機構
         res = None
         for _ in range(2):
             res = session.get(url, timeout=5)
             if res.status_code == 200:
                 break
 
-        # 💡UPDATE v41.3: 失敗理由のログ化
+        # 💡UPDATE v41.3: 各銘柄のfetch成否・テキスト先頭50文字のリアルタイム追跡ログ
+        print(ticker, res.status_code, res.text[:50])
+
         if res.status_code != 200:
             print(ticker, "STATUS", res.status_code)
             return None
@@ -475,7 +477,7 @@ def build_message(df):
 
     msg = []
 
-    # 💡UPDATE v41.3: バージョン名の変更
+    # UPDATE v41.3: バージョン名の変更
     msg.append("🚀 GrowthRadar v41.3 (DIAGNOSTIC & STABILIZED MODEL)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
@@ -652,6 +654,17 @@ def run():
     session = requests.Session()
     session.headers.update(HEADERS)
 
+    # 💡UPDATE v41.3: ① 1銘柄テスト（AAPL単体実行）を最優先で走らせる
+    print("--- START DIAL-IN SINGLE TEST (AAPL) ---")
+    try:
+        test_url = "https://query1.finance.yahoo.com/v8/finance/chart/AAPL?range=1y&interval=1d"
+        test_res = session.get(test_url, timeout=5)
+        print("AAPL STATUS CODE:", test_res.status_code)
+        print("AAPL TEXT PREVIEW:", test_res.text[:200])
+    except Exception as e:
+        print("AAPL TEST EXCEPTION:", str(e))
+    print("---------------------------------------")
+
     universe = load_universe()
 
     results = []
@@ -668,7 +681,7 @@ def run():
             if rlt:
                 results.append(rlt)
 
-    # 💡UPDATE v41.3: FETCH成功数のログ確認
+    # UPDATE v41.3: FETCH成功数のログ確認
     print(f"RESULT COUNT: {len(results)}")
 
     if not results:
