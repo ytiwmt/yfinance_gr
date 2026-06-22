@@ -113,7 +113,7 @@ def fetch(session, ticker):
             if res.status_code == 200:
                 break
 
-        # 💡UPDATE v41.3: 各銘柄のfetch成否・テキスト先頭50文字のリアルタイム追跡ログ
+        # UPDATE v41.3: 各銘柄のfetch成否・テキスト先頭50文字のリアルタイム追跡ログ
         print(ticker, res.status_code, res.text[:50])
 
         if res.status_code != 200:
@@ -132,11 +132,18 @@ def fetch(session, ticker):
             return None
 
         price = close[-1]
+        vol_base = np.mean(volume[-20:-5])
+
+        # 💡💡💡 UPDATE: スクリーニング条件直前での個別データダンプの追加 💡💡💡
+        print(
+            ticker,
+            "price:", price,
+            "vol_base:", vol_base,
+            "len(close):", len(close)
+        )
 
         if price < MIN_PRICE:
             return None
-
-        vol_base = np.mean(volume[-20:-5])
 
         if np.isnan(vol_base) or vol_base <= 0:
             return None
@@ -654,7 +661,7 @@ def run():
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    # 💡UPDATE v41.3: ① 1銘柄テスト（AAPL単体実行）を最優先で走らせる
+    # UPDATE v41.3: ① 1銘柄テスト（AAPL単体実行）を最優先で走らせる
     print("--- START DIAL-IN SINGLE TEST (AAPL) ---")
     try:
         test_url = "https://query1.finance.yahoo.com/v8/finance/chart/AAPL?range=1y&interval=1d"
