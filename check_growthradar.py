@@ -278,14 +278,14 @@ def fetch(session, ticker):
             yearly_trend_factor = 0.0
 
         # =========================
-        # SECOND WIND (v42.1)
+        # SECOND WIND (v42.1改)
         # =========================
-        # 💡UPDATE v42.1: ③ second_wind_setupの形状判定基準を絞り込み
+        # 💡UPDATE v42.1: ② SECOND WINDの形状判定基準をさらに厳格化
         second_wind_base = (
-            m3 > 0.5 and
+            m3 > 0.45 and
             m1 > 0.25 and
             vol_ratio > 1.8 and
-            extension < 5
+            extension < 3.5
         )
 
         second_wind_setup = second_wind_base
@@ -439,7 +439,7 @@ def build_message(df):
 
     msg = []
 
-    # 💡UPDATE v42.1: バージョン表示名の変更
+    # UPDATE v42.1: バージョン表示名の変更
     msg.append("🚀 GrowthRadar v42.1") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
@@ -660,19 +660,25 @@ def run():
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
+    # 💡UPDATE v42.1: ④ 銘柄数制御を追加（ノイズ過多・無限増殖の抑止として上位300件にクリップ）
+    df = df.sort_values("score", ascending=False).head(300)
+
     # UPDATE v42.0: 修正③（必須） ランキング算出時、NaNによるクラッシュを防ぐために明示的防衛
+    # 300件クリップ後のデータフレームに対して正しく相対順位を再算出
     buy_rank = df["score"].rank(pct=True).fillna(0)
 
     # UPDATE v42.0: 修正②（必須） SWS関連フラグの完全な bool 固定
     df["second_wind_setup"] = df["second_wind_setup"].astype(bool)
     df["second_wind_watch"] = df["second_wind_watch"].astype(bool)
     df["second_wind_trigger"] = df["second_wind_trigger"].astype(bool)
+    df["breakout"] = df["breakout"].astype(bool)
 
-    # 💡UPDATE v42.1: ① PRIME選出枠を上位5%（>= 0.95）に変更 ＆ ② 長期トレンド評価を厳格化（>= 0.5）
+    # 💡UPDATE v42.1: ① & ③ PRIME WINDOW判定の再設計（強い + 上位のAND結合、およびbreakout/triggerの強制連動化）
     df["prime_window"] = (
-        (df["second_wind_setup"] == True) & 
-        (buy_rank >= 0.95) & 
-        (df["yearly_trend_factor"] >= 0.5)
+        (df["second_wind_trigger"] == True) & 
+        (df["breakout"] == True) & 
+        (df["score"] >= 3.5) & 
+        (buy_rank >= 0.85)
     )
 
     text = build_message(df)
