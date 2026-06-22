@@ -240,7 +240,6 @@ def fetch(session, ticker):
             delta = 0.0
 
         streak = calc_streak(close)
-        recent_high_streak = calc_high_streak(close)
 
         # =========================
         # STREAK BONUS
@@ -278,43 +277,22 @@ def fetch(session, ticker):
             yearly_trend_factor = 0.0
 
         # =========================
-        # SECOND WIND (v43.3 時間構造・因果関係の正常化)
+        # SECOND WIND ANALOG MODEL (v43.4 核心部スコア化への移行)
         # =========================
-        # 10日間の価格収縮判定（Squeeze）
-        consolidation = (
-            np.std(close[-10:]) / (np.mean(close[-10:]) + 1e-9) < 0.03
+        recovery = (np.mean(close[-5:]) / (np.mean(close[-20:-5]) + 1e-9) - 1)
+
+        # 💡UPDATE v43.4: ① SW遷移圧スコア（過去高値圏からの崩れ＋回復初動の強さ＋出来高枯れ）
+        transition_pressure = (
+            ((high_52w - price) / (high_52w + 1e-9) * 2.0)
+            + (recovery * 3.0)
+            + (1.0 - vol_ratio)
         )
 
-        # 💡UPDATE v43.3: ① SW定義（大波からの調整深度・反転兆候・完全なる出来高枯れ）
-        drawdown = (price / max(close[-60:]) - 1)
-        recovery = (np.mean(close[-5:]) / np.mean(close[-20:-5]) - 1)
-
-        second_wind_watch = (
-            drawdown < -0.20 and
-            drawdown > -0.60 and
-            recovery > 0 and
-            vol_ratio < 1.3 and
-            consolidation and
-            yearly_trend_factor >= 0.25
+        # 💡UPDATE v43.4: ② & ③ SW定義を置き換え（再加速ポテンシャルの強さを表す連続スコアへ）
+        second_wind_score = (
+            transition_pressure
+            * yearly_trend_factor
         )
-
-        # 💡UPDATE v43.3: ② second_wind_setup（ステルス資金流入開始・未ブレイク・加熱前）
-        second_wind_setup = (
-            second_wind_watch and
-            vol_ratio > 1.5 and
-            breakout == False and
-            extension < 2.0
-        )
-
-        # 既存トリガー構造の定義維持
-        second_wind_trigger = (
-            second_wind_setup and
-            vol_ratio > 1.6 and
-            m1 > 0.2
-        )
-
-        # 💡UPDATE v43.3: ④ BUY側の問題（SWは仕込み枠として完全分離、スコア加算ボーナスを完全撤廃）
-        second_wind_bonus = 0.0
 
         # =========================
         # FINAL SCORE
@@ -323,7 +301,6 @@ def fetch(session, ticker):
             base_score +
             max(delta, 0) * 0.45 +
             streak_bonus +
-            second_wind_bonus +
             long_term_bonus -
             ext_penalty
         )
@@ -338,14 +315,11 @@ def fetch(session, ticker):
             "breakout": bool(breakout),
             "ext": float(round(float(extension), 2)),
 
-            # SW
-            "second_wind_watch": bool(second_wind_watch),
-            "second_wind_setup": bool(second_wind_setup),
-            "second_wind_trigger": bool(second_wind_trigger),
+            # SW (v43.4: フラグから再加速ポテンシャルスコアへ完全刷新)
+            "second_wind_score": float(round(float(second_wind_score), 3)),
             
             "long_term_bonus": float(round(long_term_bonus, 2)),
-            
-            "prime_window": False,  # run側で動的クロス判定を行うため初期化
+            "prime_window": False,  # run側で確定
             "yearly_trend_factor": yearly_trend_factor
         }
 
@@ -360,9 +334,6 @@ def build_buy(df):
     buy = df.copy()
 
     for col in [
-        "second_wind_watch",
-        "second_wind_setup",
-        "second_wind_trigger",
         "prime_window"
     ]:
         if col in buy.columns:
@@ -384,23 +355,16 @@ def build_buy(df):
         0
     ) * 0.35
 
+    # 💡UPDATE v43.4: ④ BUYとの接続（再加速エッジをマイルドに加算。旧SWセットアップ除外は撤廃され融合）
+    sw_edge = buy["second_wind_score"] * 0.5
+
     buy["buy_score"] = (
         buy["score"] +
         structure_bonus +
-        streak_bonus -
+        streak_bonus +
+        sw_edge -
         ext_penalty
     )
-
-    # 💡UPDATE v43.3: ③ SWをBUYから完全分離（仕込み状態のSWは通常のブレイクアウト枠から排除）
-    buy = buy[~buy["second_wind_setup"]]
-
-    # UPDATE v41.12: 安全化
-    buy = buy[
-        ~(
-            (buy["second_wind_setup"] == True) &
-            (buy["yearly_trend_factor"] == 0)
-        )
-    ]
 
     buy = buy.sort_values(
         "buy_score",
@@ -417,14 +381,10 @@ def build_message(df):
 
     buy = build_buy(df)
 
-    # 表示バグ・汚染防止のため明示的ディープコピーを維持
-    sw_watch = df[df["second_wind_watch"] == True].copy()
-    sw_setup = df[df["second_wind_setup"] == True].copy()
-
     msg = []
 
-    # UPDATE v43.3: バージョン表記更新
-    msg.append("🚀 GrowthRadar v43.3") 
+    # UPDATE v43.4: バージョン表記更新
+    msg.append("🚀 GrowthRadar v43.4") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("⚠️ Redis: OFF (Stateless Mode)")
@@ -435,21 +395,15 @@ def build_message(df):
     for _, row in buy.iterrows():
 
         tag = ""
-
         if row.prime_window:
             tag = " 👑PRIME"
-        elif row.second_wind_trigger:
-            tag = " SW🔥"
-        elif row.second_wind_setup:
-            tag = " SW🧩"
-        elif row.second_wind_watch:
-            tag = " SW👀"
+        elif row.second_wind_score > 1.5:  # ポテンシャル高の可視化インジケータ
+            tag = " SW⚡"
 
         msg.append(
             f"{row.ticker} "
             f"S:{row.buy_score:.2f} "
-            f"LT:{row.long_term_bonus:.2f} "
-            f"Streak:{row.streak} "
+            f"SW_Pot:{row.second_wind_score:.2f} "
             f"Ext:{row.ext:.2f}"
             f"{tag}"
         )
@@ -513,65 +467,20 @@ def build_message(df):
     else:
         msg.append("None")
         
-    # DEBUG
-    msg.append("")
-    msg.append(f"DEBUG SWW RAW:{len(sw_watch)}")
-    msg.append(f"DEBUG SWS RAW:{len(sw_setup)}")
-    
     # =========================
-    # SECOND WIND WATCH
+    # POTENTIAL SECOND WIND TOP LIST (v43.4 スコア順での監視)
     # =========================
     msg.append("")
-    msg.append("🌊👀 SECOND WIND WATCH")
+    msg.append("🌊⚡ HIGH SW POTENTIAL (TOP 4)")
 
-    sw_watch_sorted = sw_watch.sort_values("score", ascending=False).head(4)
+    sw_top = df.sort_values("second_wind_score", ascending=False).head(4)
 
-    if len(sw_watch_sorted):
-        for _, row in sw_watch_sorted.iterrows():
+    if len(sw_top) and sw_top["second_wind_score"].max() > 0:
+        for _, row in sw_top.iterrows():
             msg.append(
                 f"{row.ticker} "
-                f"S:{row.score:.2f} "
-                f"Ext:{row.ext:.2f}"
-            )
-    else:
-        msg.append("None")
-
-    # =========================
-    # SECOND WIND SETUP
-    # =========================
-    msg.append("")
-    msg.append("🌊🧩 SECOND WIND SETUP")
-
-    sw_setup_sorted = sw_setup.sort_values("score", ascending=False).head(4)
-
-    if len(sw_setup_sorted):
-        for _, row in sw_setup_sorted.iterrows():
-            msg.append(
-                f"{row.ticker} "
-                f"S:{row.score:.2f} "
-                f"Ext:{row.ext:.2f}"
-            )
-    else:
-        msg.append("None")
-
-    # =========================
-    # SECOND WIND TRIGGER
-    # =========================
-    msg.append("")
-    msg.append("🌊🔥 SECOND WIND TRIGGER")
-
-    sw_trigger = (
-        df[df["second_wind_trigger"] == True]
-        .sort_values("score", ascending=False)
-        .head(4)
-    )
-
-    if len(sw_trigger):
-        for _, row in sw_trigger.iterrows():
-            msg.append(
-                f"{row.ticker} "
-                f"S:{row.score:.2f} "
-                f"Ext:{row.ext:.2f}"
+                f"Pot:{row.second_wind_score:.2f} "
+                f"S:{row.score:.2f}"
             )
     else:
         msg.append("None")
@@ -582,11 +491,11 @@ def build_message(df):
     msg.append("")
     msg.append("👑 PRIME WINDOW")
 
-    prime = df[df["prime_window"] == True].sort_values("score", ascending=False).head(5)
+    prime = df[df["prime_window"] == True].sort_values("pw_score", ascending=False).head(5)
 
     if len(prime):
         for _, row in prime.iterrows():
-            msg.append(f"{row.ticker} S:{row.score:.2f} LT:{row.long_term_bonus:.2f}")
+            msg.append(f"{row.ticker} PW_S:{row.pw_score:.2f} S:{row.score:.2f}")
     else:
         msg.append("None")
 
@@ -634,29 +543,20 @@ def run():
     df = pd.DataFrame(results)
 
     # 数値列一括キャスト
-    num_cols = ["score", "ext", "long_term_bonus", "streak", "yearly_trend_factor"]
+    num_cols = ["score", "ext", "long_term_bonus", "streak", "yearly_trend_factor", "second_wind_score"]
     for c in num_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
     # 銘柄数制御（上位300件にクリップ）
     df = df.sort_values("score", ascending=False).head(300)
-
-    df["second_wind_setup"] = df["second_wind_setup"].astype(bool)
-    df["second_wind_watch"] = df["second_wind_watch"].astype(bool)
-    df["second_wind_trigger"] = df["second_wind_trigger"].astype(bool)
     df["breakout"] = df["breakout"].astype(bool)
 
-    # 💡UPDATE v43.3: ③ PWは“交差＋上位制限”に変更（仕込みの完成度と買いの勢いの真の交差点）
-    df["pw_score"] = (
-        df["score"] * 0.6 +
-        df["second_wind_setup"].astype(int) * 2.0 +
-        df["yearly_trend_factor"] * 1.5 -
-        df["ext"] * 0.3
-    )
+    # 💡UPDATE v43.4: ⑤ PWも1行だけ修正（連続変数化したSWスコアを1.2倍で乗せる新pw_scoreモデル）
+    df["pw_score"] = df["score"] + df["second_wind_score"] * 1.2
 
     df["prime_window"] = (
-        df["second_wind_setup"] &
+        (df["second_wind_score"] > 0) &  # 最低限のSWポテンシャルの存在
         (df["pw_score"] >= df["pw_score"].quantile(0.85))
     )
 
