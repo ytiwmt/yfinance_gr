@@ -278,12 +278,13 @@ def fetch(session, ticker):
             yearly_trend_factor = 0.0
 
         # =========================
-        # SECOND WIND (v42.0)
+        # SECOND WIND (v42.1)
         # =========================
+        # 💡UPDATE v42.1: ③ second_wind_setupの形状判定基準を絞り込み
         second_wind_base = (
-            m3 > 0.3 and
-            m1 > 0.15 and
-            vol_ratio > 1.5 and
+            m3 > 0.5 and
+            m1 > 0.25 and
+            vol_ratio > 1.8 and
             extension < 5
         )
 
@@ -346,7 +347,6 @@ def fetch(session, ticker):
 def build_buy(df):
     buy = df.copy()
 
-    # 💡UPDATE v42.0: 危険な "boolean" 型キャストを廃止し、安全なネイティブ bool キャストへ修正
     for col in [
         "second_wind_watch",
         "second_wind_setup",
@@ -354,9 +354,6 @@ def build_buy(df):
         "prime_window"
     ]:
         buy[col] = buy[col].fillna(False).astype(bool)
-
-    # 💡UPDATE v42.0: column崩壊の原因となっていた `df = df.astype(float, errors="ignore")` を完全削除。
-    # すでに run() 側で数値列 (num_cols) のみの安全キャストを行っているため、ここでの処理は不要です。
 
     structure_bonus = (
         (buy["phase"] == "TRANSITION") * 0.7 +
@@ -442,8 +439,8 @@ def build_message(df):
 
     msg = []
 
-    # UPDATE v42.0: バージョン表示名の変更
-    msg.append("🚀 GrowthRadar v42.0") 
+    # 💡UPDATE v42.1: バージョン表示名の変更
+    msg.append("🚀 GrowthRadar v42.1") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("⚠️ Redis: OFF (Stateless Mode)")
@@ -671,11 +668,11 @@ def run():
     df["second_wind_watch"] = df["second_wind_watch"].astype(bool)
     df["second_wind_trigger"] = df["second_wind_trigger"].astype(bool)
 
-    # UPDATE v42.0: yearly_trend_factorの完全数値化保証により、ここでの型混入クラッシュを完璧にブロック
+    # 💡UPDATE v42.1: ① PRIME選出枠を上位5%（>= 0.95）に変更 ＆ ② 長期トレンド評価を厳格化（>= 0.5）
     df["prime_window"] = (
         (df["second_wind_setup"] == True) & 
-        (buy_rank >= 0.8) & 
-        (df["yearly_trend_factor"] >= 0.25)
+        (buy_rank >= 0.95) & 
+        (df["yearly_trend_factor"] >= 0.5)
     )
 
     text = build_message(df)
