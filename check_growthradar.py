@@ -4,7 +4,7 @@ import random
 import re
 import redis
 import json  # NEW: sws_logのシリアライズ用に追加
-import time  # ③ rate limit対策：固定スロットリング用
+import time  # v41.6: スロットリング用
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -18,7 +18,7 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
 REDIS_URL = os.environ.get("REDIS_URL")
 
 SCAN_SIZE = 1500
-MAX_WORKERS = 2  # 💡UPDATE v41.6: ③ rate limit対策（スレッド数を2まで抑制）
+MAX_WORKERS = 2  # v41.6: rate limit対策
 
 MIN_PRICE = 5.0
 MIN_VOL = 300000
@@ -38,6 +38,19 @@ ETF_BLACKLIST = {
     "AMDL", "IONL", "NBIG", "MVLL",
     "SMH", "IGV", "BOTZ", "TAN"
 }
+
+# =========================
+# 💡UPDATE v41.7: ① safe_float 関数の定義
+# =========================
+def safe_float(x):
+    if isinstance(x, (int, float, np.number)):
+        return float(x)
+    if x is None:
+        return 0.0
+    try:
+        return float(str(x).replace("np.float64(", "").replace(")", ""))
+    except:
+        return 0.0
 
 # =========================
 # REDIS
@@ -101,7 +114,7 @@ def load_universe():
 # =========================
 def fetch(session, ticker):
     try:
-        # 💡UPDATE v41.6: ③ rate limit対策（確実に0.2秒の強制ウェイト）
+        # v41.6: rate limit対策
         time.sleep(0.2)
 
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1y&interval=1d"
@@ -117,14 +130,14 @@ def fetch(session, ticker):
             print(ticker, "STATUS", res.status_code)
             return None
 
-        # 💡UPDATE v41.6: ② JSON安全チェック追加（エラーHTMLや壊れた生テキスト対策）
+        # v41.6: JSON安全チェック
         if "chart" not in res.text:
             print(ticker, "BAD RESPONSE")
             return None
 
         data = res.json()["chart"]["result"][0]
 
-        # 💡UPDATE v41.6: ④ Yahoo壊れ対策（空配列やキー欠損判定）
+        # v41.6: Yahoo壊れ対策
         if not data.get("indicators"):
             return None
 
@@ -247,8 +260,9 @@ def fetch(session, ticker):
             recent_high_streak = r.get(f"highstreak:{ticker}")
             recent_high_streak = int(recent_high_streak) if recent_high_streak else 0
 
+            # 💡UPDATE v41.7: ② Redis取得値の安全な型キャスト
             if prev_score is not None:
-                delta = base_score - float(prev_score)
+                delta = base_score - safe_float(prev_score)
 
             if prev_streak is not None:
                 streak = int(prev_streak)
@@ -386,7 +400,8 @@ def fetch(session, ticker):
             ext_penalty
         )
 
-        score = round(float(score), 2)
+        # 💡UPDATE v41.7: 返却直前でsafe_floatを適用し型を完全担保
+        score = safe_float(round(float(score), 2))
 
         return {
             "ticker": ticker,
@@ -394,14 +409,14 @@ def fetch(session, ticker):
             "score": score,
             "streak": int(streak),
             "breakout": bool(breakout),
-            "ext": round(float(extension), 2),
+            "ext": safe_float(round(float(extension), 2)),
 
             # NEW
             "second_wind_watch": bool(second_wind_watch),
             "second_wind_setup": bool(second_wind_setup),
             "second_wind_trigger": bool(second_wind_trigger),
             
-            "long_term_bonus": round(long_term_bonus, 2),
+            "long_term_bonus": safe_float(round(long_term_bonus, 2)),
             
             # パーセンタイル計算用にプレースホルダーを定義
             "prime_window": False,
@@ -409,7 +424,7 @@ def fetch(session, ticker):
         }
 
     except Exception as e:
-        # 💡UPDATE v41.6: ① パース処理やその他例外を捉える原因特定用エラーログ
+        # v41.6: 原因特定用エラーログ
         print(ticker, "ERROR:", e)
         return None
 
@@ -484,8 +499,8 @@ def build_message(df):
 
     msg = []
 
-    # 💡UPDATE v41.6: バージョン表示名の変更
-    msg.append("🚀 GrowthRadar v41.6 (HARDENED MODEL)") 
+    # 💡UPDATE v41.7: バージョン表示名の変更
+    msg.append("🚀 GrowthRadar v41.7 (CAST SAFE MODEL)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -639,7 +654,7 @@ def build_message(df):
         msg.append("None")
 
     # =========================
-    # PRIME WINDOW (UPDATE v41.0: AT THE VERY BOTTOM)
+    # PRIME WINDOW
     # =========================
     msg.append("")
     msg.append("👑 PRIME WINDOW")
@@ -661,7 +676,6 @@ def run():
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    # 最序盤の単体生存テスト
     print("--- START DIAL-IN SINGLE TEST (AAPL) ---")
     try:
         test_url = "https://query1.finance.yahoo.com/v8/finance/chart/AAPL?range=1y&interval=1d"
@@ -688,7 +702,6 @@ def run():
             if rlt:
                 results.append(rlt)
 
-    # 最終処理に回せたValidな銘柄の総数カウント
     print(f"RESULT COUNT: {len(results)}")
 
     if not results:
@@ -696,6 +709,11 @@ def run():
         return
 
     df = pd.DataFrame(results)
+
+    # 💡UPDATE v41.7: ③ 各列データに対する safe_float の一括バインド適用
+    df["score"] = df["score"].apply(safe_float)
+    df["ext"] = df["ext"].apply(safe_float)
+    df["long_term_bonus"] = df["long_term_bonus"].apply(safe_float)
 
     # UPDATE v41.0: CROSS-SECTIONAL RANK & PRIME WINDOW RECALC
     buy_rank = df["score"].rank(pct=True)
