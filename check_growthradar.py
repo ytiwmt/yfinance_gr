@@ -4,6 +4,7 @@ import random
 import re
 import redis
 import json  # NEW: sws_logのシリアライズ用に追加
+import time  # 💡UPDATE v41.3: スロットリング用に追加
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -17,7 +18,7 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
 REDIS_URL = os.environ.get("REDIS_URL")
 
 SCAN_SIZE = 1500
-MAX_WORKERS = 12
+MAX_WORKERS = 4  # 💡UPDATE v41.3: 12 -> 4 へ引き下げ
 
 MIN_PRICE = 5.0
 MIN_VOL = 300000
@@ -100,12 +101,21 @@ def load_universe():
 # =========================
 def fetch(session, ticker):
     try:
-        # 年足リターン（約252営業日前）を計算するため、取得範囲を 6mo から 1y に変更
+        # 💡UPDATE v41.3: スロットリングの挿入
+        time.sleep(0.05)
+
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1y&interval=1d"
 
-        res = session.get(url, timeout=5)
+        # 💡UPDATE v41.3: 最大2回のリトライ機構
+        res = None
+        for _ in range(2):
+            res = session.get(url, timeout=5)
+            if res.status_code == 200:
+                break
 
+        # 💡UPDATE v41.3: 失敗理由のログ化
         if res.status_code != 200:
+            print(ticker, "STATUS", res.status_code)
             return None
 
         data = res.json()["chart"]["result"][0]
@@ -386,7 +396,7 @@ def fetch(session, ticker):
             
             "long_term_bonus": round(long_term_bonus, 2),
             
-            # 💡パーセンタイル計算用にプレースホルダーを定義
+            # パーセンタイル計算用にプレースホルダーを定義
             "prime_window": False,
             "yearly_trend_factor": yearly_trend_factor
         }
@@ -420,9 +430,7 @@ def build_buy(df):
         buy["second_wind_setup"] * 0.9
     )
 
-    # ---------------------------------------------------------
     # UPDATE v41.0: PRIME PRIORITY SCORE BONUS
-    # ---------------------------------------------------------
     buy["prime_bonus"] = buy["prime_window"] * 1.0
 
     buy["buy_score"] = (
@@ -434,16 +442,13 @@ def build_buy(df):
         buy["prime_bonus"]
     )
 
-    # ---------------------------------------------------------
     # UPDATE v41.0: FILTER OUT YEARLY TREND FACTOR == 0 FROM SWS
-    # ---------------------------------------------------------
     buy = buy[
         ~(
             (buy["second_wind_setup"]) &
             (buy["yearly_trend_factor"] == 0)
         )
     ]
-    # ---------------------------------------------------------
 
     buy = buy.sort_values(
         "buy_score",
@@ -470,8 +475,8 @@ def build_message(df):
 
     msg = []
 
-    # 💡UPDATE v41.0: バージョン名の変更
-    msg.append("🚀 GrowthRadar v41.0 (PRIME WINDOW READJUSTED MODEL)") 
+    # 💡UPDATE v41.3: バージョン名の変更
+    msg.append("🚀 GrowthRadar v41.3 (DIAGNOSTIC & STABILIZED MODEL)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -625,7 +630,7 @@ def build_message(df):
         msg.append("None")
 
     # =========================
-    #👑 PRIME WINDOW (UPDATE v41.0: AT THE VERY BOTTOM)
+    # PRIME WINDOW (UPDATE v41.0: AT THE VERY BOTTOM)
     # =========================
     msg.append("")
     msg.append("👑 PRIME WINDOW")
@@ -663,15 +668,16 @@ def run():
             if rlt:
                 results.append(rlt)
 
+    # 💡UPDATE v41.3: FETCH成功数のログ確認
+    print(f"RESULT COUNT: {len(results)}")
+
     if not results:
         print("NO DATA")
         return
 
     df = pd.DataFrame(results)
 
-    # ---------------------------------------------------------
-    # 💡UPDATE v41.0: CROSS-SECTIONAL RANK & PRIME WINDOW RECALC
-    # ---------------------------------------------------------
+    # UPDATE v41.0: CROSS-SECTIONAL RANK & PRIME WINDOW RECALC
     buy_rank = df["score"].rank(pct=True)
 
     df["prime_window"] = (
@@ -679,7 +685,6 @@ def run():
         (buy_rank >= 0.8) & 
         (df["yearly_trend_factor"] >= 0.25)
     )
-    # ---------------------------------------------------------
 
     text = build_message(df)
 
