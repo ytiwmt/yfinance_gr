@@ -278,38 +278,43 @@ def fetch(session, ticker):
             yearly_trend_factor = 0.0
 
         # =========================
-        # SECOND WIND (v43.0に基づく時間構造)
+        # SECOND WIND (v43.3 時間構造・因果関係の正常化)
         # =========================
-        trend_history = (m3 > 0.5)
-
-        second_wind_setup = (
-            m3 > 0.6 and
-            extension < 2.5 and
-            vol_ratio > 1.4
+        # 10日間の価格収縮判定（Squeeze）
+        consolidation = (
+            np.std(close[-10:]) / (np.mean(close[-10:]) + 1e-9) < 0.03
         )
-        second_wind_setup = second_wind_setup and trend_history
+
+        # 💡UPDATE v43.3: ① SW定義（大波からの調整深度・反転兆候・完全なる出来高枯れ）
+        drawdown = (price / max(close[-60:]) - 1)
+        recovery = (np.mean(close[-5:]) / np.mean(close[-20:-5]) - 1)
 
         second_wind_watch = (
-            second_wind_setup and
-            recent_high_streak >= 2
+            drawdown < -0.20 and
+            drawdown > -0.60 and
+            recovery > 0 and
+            vol_ratio < 1.3 and
+            consolidation and
+            yearly_trend_factor >= 0.25
         )
 
+        # 💡UPDATE v43.3: ② second_wind_setup（ステルス資金流入開始・未ブレイク・加熱前）
+        second_wind_setup = (
+            second_wind_watch and
+            vol_ratio > 1.5 and
+            breakout == False and
+            extension < 2.0
+        )
+
+        # 既存トリガー構造の定義維持
         second_wind_trigger = (
             second_wind_setup and
             vol_ratio > 1.6 and
             m1 > 0.2
         )
 
-        second_wind_quality = (
-            0.6 + 0.4 * yearly_trend_factor
-        )
-
+        # 💡UPDATE v43.3: ④ BUY側の問題（SWは仕込み枠として完全分離、スコア加算ボーナスを完全撤廃）
         second_wind_bonus = 0.0
-        if second_wind_setup:
-            second_wind_bonus = (
-                0.75 *
-                second_wind_quality
-            )
 
         # =========================
         # FINAL SCORE
@@ -340,7 +345,7 @@ def fetch(session, ticker):
             
             "long_term_bonus": float(round(long_term_bonus, 2)),
             
-            "prime_window": False,  # 後段の交差判定で上書き
+            "prime_window": False,  # run側で動的クロス判定を行うため初期化
             "yearly_trend_factor": yearly_trend_factor
         }
 
@@ -357,9 +362,11 @@ def build_buy(df):
     for col in [
         "second_wind_watch",
         "second_wind_setup",
-        "second_wind_trigger"
+        "second_wind_trigger",
+        "prime_window"
     ]:
-        buy[col] = buy[col].fillna(False).astype(bool)
+        if col in buy.columns:
+            buy[col] = buy[col].fillna(False).astype(bool)
 
     structure_bonus = (
         (buy["phase"] == "TRANSITION") * 0.7 +
@@ -377,40 +384,15 @@ def build_buy(df):
         0
     ) * 0.35
 
-    second_wind_bonus = (
-        buy["second_wind_setup"] * 0.9
-    )
-
     buy["buy_score"] = (
         buy["score"] +
         structure_bonus +
-        streak_bonus +
-        second_wind_bonus -
+        streak_bonus -
         ext_penalty
     )
 
-    # 💡UPDATE v43.1: ① SWを“スコア化”する
-    buy["sw_score"] = (
-        buy["second_wind_setup"].astype(int) * 0.5 +
-        buy["second_wind_watch"].astype(int) * 0.3 +
-        buy["second_wind_trigger"].astype(int) * 1.2
-    )
-
-    # 💡UPDATE v43.1: ② SWを「上位だけ(上位15%)」に制限
-    sw_threshold = buy["sw_score"].quantile(0.85)
-    buy["sw_active"] = buy["sw_score"] >= sw_threshold
-
-    # 💡UPDATE v43.1: ③ PWは“交差＋上位制限(上位25%)”に変更
-    buy_top = buy["buy_score"].quantile(0.75)
-    buy["prime_window"] = (
-        (buy["buy_score"] >= buy_top) &
-        (buy["sw_active"] == True)
-    )
-
-    buy["prime_bonus"] = buy["prime_window"] * 1.0
-    
-    # PRIME WINDOW対象には最終的なスコア底上げボーナスを適用
-    buy["buy_score"] = buy["buy_score"] + buy["prime_bonus"]
+    # 💡UPDATE v43.3: ③ SWをBUYから完全分離（仕込み状態のSWは通常のブレイクアウト枠から排除）
+    buy = buy[~buy["second_wind_setup"]]
 
     # UPDATE v41.12: 安全化
     buy = buy[
@@ -425,7 +407,7 @@ def build_buy(df):
         ascending=False
     )
 
-    return buy
+    return buy.head(5)
 
 # =========================
 # MESSAGE
@@ -433,16 +415,16 @@ def build_buy(df):
 def build_message(df):
     df = df.copy()
 
-    processed_df = build_buy(df)
-    buy_top = processed_df.head(5)
+    buy = build_buy(df)
 
-    sw_watch = processed_df[processed_df["second_wind_watch"] == True]
-    sw_setup = processed_df[processed_df["second_wind_setup"] == True]
+    # 表示バグ・汚染防止のため明示的ディープコピーを維持
+    sw_watch = df[df["second_wind_watch"] == True].copy()
+    sw_setup = df[df["second_wind_setup"] == True].copy()
 
     msg = []
 
-    # 💡UPDATE v43.1: バージョン表記更新
-    msg.append("🚀 GrowthRadar v43.1") 
+    # UPDATE v43.3: バージョン表記更新
+    msg.append("🚀 GrowthRadar v43.3") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("⚠️ Redis: OFF (Stateless Mode)")
@@ -450,7 +432,7 @@ def build_message(df):
     msg.append("")
     msg.append("💎 BUY SIGNAL")
 
-    for _, row in buy_top.iterrows():
+    for _, row in buy.iterrows():
 
         tag = ""
 
@@ -476,7 +458,7 @@ def build_message(df):
     msg.append("🔥 EARLY")
 
     early = (
-        processed_df[processed_df.phase == "EARLY"]
+        df[df.phase == "EARLY"]
         .sort_values("score", ascending=False)
         .head(4)
     )
@@ -491,7 +473,7 @@ def build_message(df):
     msg.append("⚡ TRANSITION")
 
     trans = (
-        processed_df[processed_df.phase == "TRANSITION"]
+        df[df.phase == "TRANSITION"]
         .sort_values("score", ascending=False)
         .head(4)
     )
@@ -506,7 +488,7 @@ def build_message(df):
     msg.append("🔁 CONT")
 
     cont = (
-        processed_df[processed_df.phase == "CONT"]
+        df[df.phase == "CONT"]
         .sort_values("score", ascending=False)
         .head(4)
     )
@@ -523,7 +505,7 @@ def build_message(df):
     msg.append("")
     msg.append("🌊 FIRST WAVE")
 
-    brk = processed_df[processed_df["breakout"] == True].head(4)
+    brk = df[df["breakout"] == True].head(4)
 
     if len(brk):
         for _, row in brk.iterrows():
@@ -533,8 +515,8 @@ def build_message(df):
         
     # DEBUG
     msg.append("")
-    msg.append(f"DEBUG SWW RAW:{len(processed_df[processed_df['second_wind_watch'] == True])}")
-    msg.append(f"DEBUG SWS RAW:{len(processed_df[processed_df['second_wind_setup'] == True])}")
+    msg.append(f"DEBUG SWW RAW:{len(sw_watch)}")
+    msg.append(f"DEBUG SWS RAW:{len(sw_setup)}")
     
     # =========================
     # SECOND WIND WATCH
@@ -579,7 +561,7 @@ def build_message(df):
     msg.append("🌊🔥 SECOND WIND TRIGGER")
 
     sw_trigger = (
-        processed_df[processed_df["second_wind_trigger"] == True]
+        df[df["second_wind_trigger"] == True]
         .sort_values("score", ascending=False)
         .head(4)
     )
@@ -600,11 +582,11 @@ def build_message(df):
     msg.append("")
     msg.append("👑 PRIME WINDOW")
 
-    prime = processed_df[processed_df["prime_window"] == True].sort_values("buy_score", ascending=False).head(5)
+    prime = df[df["prime_window"] == True].sort_values("score", ascending=False).head(5)
 
     if len(prime):
         for _, row in prime.iterrows():
-            msg.append(f"{row.ticker} S:{row.buy_score:.2f} LT:{row.long_term_bonus:.2f}")
+            msg.append(f"{row.ticker} S:{row.score:.2f} LT:{row.long_term_bonus:.2f}")
     else:
         msg.append("None")
 
@@ -651,19 +633,32 @@ def run():
 
     df = pd.DataFrame(results)
 
-    # UPDATE v42.0: 数値列のみに限定してキャスト
+    # 数値列一括キャスト
     num_cols = ["score", "ext", "long_term_bonus", "streak", "yearly_trend_factor"]
     for c in num_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-    # 銘柄数制御（ノイズ過多・無限増殖の抑止として上位300件にクリップ）
+    # 銘柄数制御（上位300件にクリップ）
     df = df.sort_values("score", ascending=False).head(300)
 
     df["second_wind_setup"] = df["second_wind_setup"].astype(bool)
     df["second_wind_watch"] = df["second_wind_watch"].astype(bool)
     df["second_wind_trigger"] = df["second_wind_trigger"].astype(bool)
     df["breakout"] = df["breakout"].astype(bool)
+
+    # 💡UPDATE v43.3: ③ PWは“交差＋上位制限”に変更（仕込みの完成度と買いの勢いの真の交差点）
+    df["pw_score"] = (
+        df["score"] * 0.6 +
+        df["second_wind_setup"].astype(int) * 2.0 +
+        df["yearly_trend_factor"] * 1.5 -
+        df["ext"] * 0.3
+    )
+
+    df["prime_window"] = (
+        df["second_wind_setup"] &
+        (df["pw_score"] >= df["pw_score"].quantile(0.85))
+    )
 
     text = build_message(df)
 
