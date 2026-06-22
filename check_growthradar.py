@@ -4,7 +4,7 @@ import random
 import re
 import redis
 import json  # NEW: sws_logのシリアライズ用に追加
-import time  # ④ sleep変更用
+import time  # v41.8: スロットリング用
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -18,10 +18,10 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
 REDIS_URL = os.environ.get("REDIS_URL")
 
 SCAN_SIZE = 1500
-MAX_WORKERS = 5  # 💡UPDATE v41.6: ⑥ 現実ラインの 4〜6 に引き上げ（5を選択）
+MAX_WORKERS = 5  # v41.8: 4〜6の現実ライン
 
 MIN_PRICE = 5.0
-MIN_VOL = 100000  # 💡UPDATE v41.8: ① 出来高制限を緩和（300000 -> 100000）
+MIN_VOL = 100000  # v41.8: 緩和値
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0"
@@ -101,7 +101,7 @@ def load_universe():
 # =========================
 def fetch(session, ticker):
     try:
-        # 💡UPDATE v41.8: ④ sleepを戻す（0.2 -> 0.05）
+        # v41.8: スロットリング
         time.sleep(0.05)
 
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1y&interval=1d"
@@ -117,8 +117,6 @@ def fetch(session, ticker):
             print(ticker, "STATUS", res.status_code)
             return None
 
-        # 💡UPDATE v41.8: ⑤ 誤爆の多い JSON（"chart"）ガードを削除
-
         data = res.json()["chart"]["result"][0]
 
         # v41.6: Yahoo壊れ対策
@@ -131,7 +129,7 @@ def fetch(session, ticker):
         close = [x for x in close if x is not None]
         volume = [x for x in volume if x is not None]
 
-        # 💡UPDATE v41.8: ② 上場期間の制限を緩和（70 -> 50）
+        # v41.8: 緩和値
         if len(close) < 50:
             return None
 
@@ -245,9 +243,8 @@ def fetch(session, ticker):
             recent_high_streak = r.get(f"highstreak:{ticker}")
             recent_high_streak = int(recent_high_streak) if recent_high_streak else 0
 
-            # 💡UPDATE v41.8: ③ safe_floatを削除し、通常のfloatへ復元
-            if prev_score is not None:
-                delta = base_score - float(prev_score)
+            # 💡UPDATE v41.9: ④ Redis deltaの安全化（or 0 によるNone回避）
+            delta = base_score - float(prev_score or 0)
 
             if prev_streak is not None:
                 streak = int(prev_streak)
@@ -385,23 +382,23 @@ def fetch(session, ticker):
             ext_penalty
         )
 
-        # 💡UPDATE v41.8: ③ safe_floatを削除
         score = round(float(score), 2)
 
+        # 💡UPDATE v41.9: ③ fetch側のreturn値を完全に標準float化
         return {
             "ticker": ticker,
             "phase": phase,
-            "score": score,
+            "score": float(score),
             "streak": int(streak),
             "breakout": bool(breakout),
-            "ext": round(float(extension), 2),
+            "ext": float(round(float(extension), 2)),
 
             # NEW
             "second_wind_watch": bool(second_wind_watch),
             "second_wind_setup": bool(second_wind_setup),
             "second_wind_trigger": bool(second_wind_trigger),
             
-            "long_term_bonus": round(long_term_bonus, 2),
+            "long_term_bonus": float(round(long_term_bonus, 2)),
             
             # パーセンタイル計算用にプレースホルダーを定義
             "prime_window": False,
@@ -416,6 +413,9 @@ def fetch(session, ticker):
 # BUY
 # =========================
 def build_buy(df):
+    # 💡UPDATE v41.9: ② build_buy直前での型再保証（errors="ignore"で非数値列を退避）
+    df = df.astype(float, errors="ignore")
+
     buy = df.copy()
 
     structure_bonus = (
@@ -483,8 +483,8 @@ def build_message(df):
 
     msg = []
 
-    # 💡UPDATE v41.8: バージョン表示名の変更
-    msg.append("🚀 GrowthRadar v41.8") 
+    # 💡UPDATE v41.9: バージョン表示名の変更
+    msg.append("🚀 GrowthRadar v41.9") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -694,7 +694,12 @@ def run():
 
     df = pd.DataFrame(results)
 
-    # 💡UPDATE v41.8: ③ safe_floatを適用していた列一括処理部分を削除
+    # 💡UPDATE v41.9: ① DataFrame生成直後の全列一括クレンジング
+    for col in df.columns:
+        try:
+            df[col] = df[col].apply(lambda x: float(x) if isinstance(x, (int, float, np.number)) else x)
+        except:
+            pass
 
     # UPDATE v41.0: CROSS-SECTIONAL RANK & PRIME WINDOW RECALC
     buy_rank = df["score"].rank(pct=True)
