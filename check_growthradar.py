@@ -278,27 +278,30 @@ def fetch(session, ticker):
             yearly_trend_factor = 0.0
 
         # =========================
-        # SECOND WIND (v42.2)
+        # SECOND WIND (v42.2改)
         # =========================
-        # 💡UPDATE v42.2: ① WATCH（異常検知：「形が出始め」）
+        # 💡UPDATE v42.2: ① WATCH（「形が出始め」: 伸びすぎたトレンドを天井圏として切り離す上限追加）
         second_wind_watch = (
-            m3 > 0.2 and
-            vol_ratio > 1.3 and
-            extension < 7
+            m3 > 0.25 and
+            m3 < 0.8 and
+            extension > -2.0 and
+            extension < 6.0 and
+            vol_ratio > 1.2
         )
 
-        # 💡UPDATE v42.2: ② SETUP（収束：「再加速の準備」）※WATCHを継承
+        # 💡UPDATE v42.2: ② SETUP（「圧縮状態」: 強いやつを排除し、溜まっているエネルギーを補足）
         second_wind_setup = (
             second_wind_watch and
-            recent_high_streak >= 3 and
-            extension < 4 and
-            delta > -0.1
+            abs(extension) < 2.5 and
+            delta > -0.08 and
+            recent_high_streak <= 5
         )
 
-        # 💡UPDATE v42.2: ③ TRIGGER（発火：「実際の再上昇」）※SETUPを継承
+        # 💡UPDATE v42.2: ③ TRIGGER（「ブレイクだけ」: 弱いブレイクを完全に落とす出来高制限を連動）
         second_wind_trigger = (
             second_wind_setup and
             breakout and
+            vol_ratio > 2.0 and
             m1 > 0.25
         )
 
@@ -449,7 +452,7 @@ def build_message(df):
 
     msg = []
 
-    # 💡UPDATE v42.2: バージョン表示名の変更
+    # UPDATE v42.2: バージョン表示名の維持
     msg.append("🚀 GrowthRadar v42.2") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
@@ -683,7 +686,7 @@ def run():
     df["second_wind_trigger"] = df["second_wind_trigger"].astype(bool)
     df["breakout"] = df["breakout"].astype(bool)
 
-    # 💡UPDATE v42.2: 新しい cascaded 条件を適用した PRIME WINDOW 最終判定
+    # UPDATE v42.2: 強制連動条件の適用（second_wind_trigger自体にブレイク要件が内包されたため、より強固なANDへ昇華）
     df["prime_window"] = (
         (df["second_wind_trigger"] == True) & 
         (df["breakout"] == True) & 
