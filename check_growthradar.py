@@ -243,7 +243,7 @@ def fetch(session, ticker):
             recent_high_streak = r.get(f"highstreak:{ticker}")
             recent_high_streak = int(recent_high_streak) if recent_high_streak else 0
 
-            # 💡UPDATE v41.10：② Redis読込時に壊れ値を自動検知して削除（自己修復機構）
+            # v41.10：Redis読込時に壊れ値を自動検知して削除
             if prev_score is not None:
                 try:
                     delta = base_score - float(prev_score)
@@ -281,7 +281,7 @@ def fetch(session, ticker):
             )
 
             # SAVE
-            # 💡UPDATE v41.10：① Redis保存時に必ず標準型（float/int）化してデータ汚染を鉄壁防御
+            # v41.10：Redis保存時に必ず標準型（float/int）化
             r.set(f"score:{ticker}", float(base_score), ex=86400)
             r.set(f"streak:{ticker}", int(streak), ex=86400 * 7)
             r.set(f"day:{ticker}", today, ex=86400 * 7)
@@ -489,8 +489,8 @@ def build_message(df):
 
     msg = []
 
-    # 💡UPDATE v41.10: バージョン表示名の変更
-    msg.append("🚀 GrowthRadar v41.10") 
+    # 💡UPDATE v41.11: バージョン表示名の変更
+    msg.append("🚀 GrowthRadar v41.11") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -666,7 +666,7 @@ def run():
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    # 💡UPDATE v41.10：③ GrowthRadar専用ストレージを一発で全クリアするクリーンアップ実行
+    # v41.10：GrowthRadar専用ストレージ全クリア
     if r:
         print("🧹 Redis execution: r.flushdb()")
         try:
@@ -715,11 +715,33 @@ def run():
         except:
             pass
 
+    # 💡UPDATE v41.11：修正② 重複かつ不要になったsafe_floatの個別一括適用を完全に削除
+
     # UPDATE v41.0: CROSS-SECTIONAL RANK & PRIME WINDOW RECALC
     buy_rank = df["score"].rank(pct=True)
 
+    # 💡UPDATE v41.11：修正① build_message(df) の前にSWSフラグの型を完全に真偽値（bool）固定
+    df["second_wind_setup"] = (
+        df["second_wind_setup"]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    df["second_wind_watch"] = (
+        df["second_wind_watch"]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    df["second_wind_trigger"] = (
+        df["second_wind_trigger"]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    # 💡UPDATE v41.11：修正③ prime_window条件式の明示的評価（== True）化による完全防衛
     df["prime_window"] = (
-        (df["second_wind_setup"]) & 
+        (df["second_wind_setup"] == True) & 
         (buy_rank >= 0.8) & 
         (df["yearly_trend_factor"] >= 0.25)
     )
