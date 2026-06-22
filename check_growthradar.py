@@ -4,7 +4,7 @@ import random
 import re
 import redis
 import json  # NEW: sws_logのシリアライズ用に追加
-import time  # ③ sleepランダム化用
+import time  # ③ rate limit対策：固定スロットリング用
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -18,7 +18,7 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL_GROWTHRADAR")
 REDIS_URL = os.environ.get("REDIS_URL")
 
 SCAN_SIZE = 1500
-MAX_WORKERS = 10  # 💡UPDATE v41.5: 4 -> 10 へ戻し（I/O詰まり解消）
+MAX_WORKERS = 2  # 💡UPDATE v41.6: ③ rate limit対策（スレッド数を2まで抑制）
 
 MIN_PRICE = 5.0
 MIN_VOL = 300000
@@ -101,8 +101,8 @@ def load_universe():
 # =========================
 def fetch(session, ticker):
     try:
-        # 💡UPDATE v41.5: sleepのランダムジッター化（0.0〜0.15秒）
-        time.sleep(random.uniform(0.0, 0.15))
+        # 💡UPDATE v41.6: ③ rate limit対策（確実に0.2秒の強制ウェイト）
+        time.sleep(0.2)
 
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1y&interval=1d"
 
@@ -113,12 +113,20 @@ def fetch(session, ticker):
             if res.status_code == 200:
                 break
 
-        # 💡UPDATE v41.5: 成功時ログ（res.text[:50]）は削除、エラー時のみ出力
         if res.status_code != 200:
             print(ticker, "STATUS", res.status_code)
             return None
 
+        # 💡UPDATE v41.6: ② JSON安全チェック追加（エラーHTMLや壊れた生テキスト対策）
+        if "chart" not in res.text:
+            print(ticker, "BAD RESPONSE")
+            return None
+
         data = res.json()["chart"]["result"][0]
+
+        # 💡UPDATE v41.6: ④ Yahoo壊れ対策（空配列やキー欠損判定）
+        if not data.get("indicators"):
+            return None
 
         close = data["indicators"]["quote"][0]["close"]
         volume = data["indicators"]["quote"][0]["volume"]
@@ -131,8 +139,6 @@ def fetch(session, ticker):
 
         price = close[-1]
         vol_base = np.mean(volume[-20:-5])
-
-        # 💡UPDATE v41.5: データダンプ用のプリントは完全削除（最重要）
 
         if price < MIN_PRICE:
             return None
@@ -402,7 +408,9 @@ def fetch(session, ticker):
             "yearly_trend_factor": yearly_trend_factor
         }
 
-    except:
+    except Exception as e:
+        # 💡UPDATE v41.6: ① パース処理やその他例外を捉える原因特定用エラーログ
+        print(ticker, "ERROR:", e)
         return None
 
 # =========================
@@ -476,8 +484,8 @@ def build_message(df):
 
     msg = []
 
-    # 💡UPDATE v41.5: バージョン表示名の変更
-    msg.append("🚀 GrowthRadar v41.5 (OPTIMIZED MODEL)") 
+    # 💡UPDATE v41.6: バージョン表示名の変更
+    msg.append("🚀 GrowthRadar v41.6 (HARDENED MODEL)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -653,7 +661,7 @@ def run():
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    # 単体生存確認（生存確認のため残存）
+    # 最序盤の単体生存テスト
     print("--- START DIAL-IN SINGLE TEST (AAPL) ---")
     try:
         test_url = "https://query1.finance.yahoo.com/v8/finance/chart/AAPL?range=1y&interval=1d"
@@ -680,7 +688,7 @@ def run():
             if rlt:
                 results.append(rlt)
 
-    # 最終的なフェッチ成功数確認ログ（切り分けのため残存）
+    # 最終処理に回せたValidな銘柄の総数カウント
     print(f"RESULT COUNT: {len(results)}")
 
     if not results:
