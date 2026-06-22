@@ -278,31 +278,28 @@ def fetch(session, ticker):
             yearly_trend_factor = 0.0
 
         # =========================
-        # SECOND WIND (v42.2改)
+        # SECOND WIND (v43.0 本質的定義へのリファクタリング)
         # =========================
-        # 💡UPDATE v42.2: ① WATCH（「形が出始め」: 伸びすぎたトレンドを天井圏として切り離す上限追加）
-        second_wind_watch = (
-            m3 > 0.25 and
-            m3 < 0.8 and
-            extension > -2.0 and
-            extension < 6.0 and
-            vol_ratio > 1.2
-        )
+        # 💡UPDATE v43.0: ② 時間構造（過去トレンド履歴の存在）
+        trend_history = (m3 > 0.5)
 
-        # 💡UPDATE v42.2: ② SETUP（「圧縮状態」: 強いやつを排除し、溜まっているエネルギーを補足）
+        # 💡UPDATE v43.0: ① 定義修正（breakout非依存化・過去トレンド×圧縮×ボリ再始動）
         second_wind_setup = (
-            second_wind_watch and
-            abs(extension) < 2.5 and
-            delta > -0.08 and
-            recent_high_streak <= 5
+            m3 > 0.6 and
+            extension < 2.5 and
+            vol_ratio > 1.4
+        )
+        second_wind_setup = second_wind_setup and trend_history
+
+        second_wind_watch = (
+            second_wind_setup and
+            recent_high_streak >= 2
         )
 
-        # 💡UPDATE v42.2: ③ TRIGGER（「ブレイクだけ」: 弱いブレイクを完全に落とす出来高制限を連動）
         second_wind_trigger = (
             second_wind_setup and
-            breakout and
-            vol_ratio > 2.0 and
-            m1 > 0.25
+            vol_ratio > 1.6 and
+            m1 > 0.2
         )
 
         second_wind_quality = (
@@ -338,15 +335,14 @@ def fetch(session, ticker):
             "breakout": bool(breakout),
             "ext": float(round(float(extension), 2)),
 
-            # NEW
+            # SW
             "second_wind_watch": bool(second_wind_watch),
             "second_wind_setup": bool(second_wind_setup),
             "second_wind_trigger": bool(second_wind_trigger),
             
             "long_term_bonus": float(round(long_term_bonus, 2)),
             
-            # パーセンタイル計算用にプレースホルダーを定義
-            "prime_window": False,
+            "prime_window": False,  # 後段の交差判定で上書き
             "yearly_trend_factor": yearly_trend_factor
         }
 
@@ -363,8 +359,7 @@ def build_buy(df):
     for col in [
         "second_wind_watch",
         "second_wind_setup",
-        "second_wind_trigger",
-        "prime_window"
+        "second_wind_trigger"
     ]:
         buy[col] = buy[col].fillna(False).astype(bool)
 
@@ -388,19 +383,33 @@ def build_buy(df):
         buy["second_wind_setup"] * 0.9
     )
 
-    # UPDATE v41.0: PRIME PRIORITY SCORE BONUS
-    buy["prime_bonus"] = buy["prime_window"] * 1.0
-
     buy["buy_score"] = (
         buy["score"] +
         structure_bonus +
         streak_bonus +
         second_wind_bonus -
-        ext_penalty +
-        buy["prime_bonus"]
+        ext_penalty
     )
 
-    # UPDATE v41.12: boolean型への統一に伴い、明示的な == True 評価へ安全化
+    # 💡UPDATE v43.0: ③ PWの正しい定義（BUY × SW の交差マスク生成）
+    sw_score = (
+        buy["second_wind_setup"].astype(int) * 0.6 +
+        buy["second_wind_watch"].astype(int) * 0.3 +
+        buy["second_wind_trigger"].astype(int) * 1.0
+    )
+
+    pw_mask = (
+        (buy["buy_score"] > buy["buy_score"].quantile(0.7)) &
+        (sw_score > 0.5)
+    )
+    
+    buy["prime_window"] = pw_mask
+    buy["prime_bonus"] = buy["prime_window"] * 1.0
+    
+    # PRIME WINDOW対象には改めてボーナスを加算して最終buy_scoreを確定
+    buy["buy_score"] = buy["buy_score"] + buy["prime_bonus"]
+
+    # UPDATE v41.12: 安全化
     buy = buy[
         ~(
             (buy["second_wind_setup"] == True) &
@@ -413,47 +422,25 @@ def build_buy(df):
         ascending=False
     )
 
-    return buy.head(5)
+    return buy
 
 # =========================
 # MESSAGE
 # =========================
 def build_message(df):
-    # UPDATE v41.19: build_message先頭部への型固定の追加
     df = df.copy()
 
-    bool_cols = [
-        "breakout",
-        "second_wind_watch",
-        "second_wind_setup",
-        "second_wind_trigger",
-        "prime_window"
-    ]
+    # buy側で算出された最終的なprime_windowとbuy_scoreの伝播を受けるためbuild_buyを先行評価
+    processed_df = build_buy(df)
+    buy_top = processed_df.head(5)
 
-    for col in bool_cols:
-        if col in df:
-            df[col] = (
-                df[col]
-                .fillna(False)
-                .astype(bool)
-            )
-
-    buy = build_buy(df)
-
-    # UPDATE v41.19: ターゲットリストの抽出条件を df["col"] == True に全面一括置換
-    sw_watch = df[df["second_wind_watch"] == True]
-    sw_setup = df[df["second_wind_setup"] == True]
-
-    # NEW: “調整判断フラグ”の評価（スコープへの定義）
-    sws_adjust_signal = (
-        len(sw_watch) == 0 or
-        len(sw_setup) == 0
-    )
+    sw_watch = processed_df[processed_df["second_wind_watch"] == True]
+    sw_setup = processed_df[processed_df["second_wind_setup"] == True]
 
     msg = []
 
-    # UPDATE v42.2: バージョン表示名の維持
-    msg.append("🚀 GrowthRadar v42.2") 
+    # 💡UPDATE v43.0: バージョン表記更新
+    msg.append("🚀 GrowthRadar v43.0") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("⚠️ Redis: OFF (Stateless Mode)")
@@ -461,11 +448,10 @@ def build_message(df):
     msg.append("")
     msg.append("💎 BUY SIGNAL")
 
-    for _, row in buy.iterrows():
+    for _, row in buy_top.iterrows():
 
         tag = ""
 
-        # UPDATE v41.0: PRIME WINDOW TAG PRIORITY
         if row.prime_window:
             tag = " 👑PRIME"
         elif row.second_wind_trigger:
@@ -488,7 +474,7 @@ def build_message(df):
     msg.append("🔥 EARLY")
 
     early = (
-        df[df.phase == "EARLY"]
+        processed_df[processed_df.phase == "EARLY"]
         .sort_values("score", ascending=False)
         .head(4)
     )
@@ -503,7 +489,7 @@ def build_message(df):
     msg.append("⚡ TRANSITION")
 
     trans = (
-        df[df.phase == "TRANSITION"]
+        processed_df[processed_df.phase == "TRANSITION"]
         .sort_values("score", ascending=False)
         .head(4)
     )
@@ -518,7 +504,7 @@ def build_message(df):
     msg.append("🔁 CONT")
 
     cont = (
-        df[df.phase == "CONT"]
+        processed_df[processed_df.phase == "CONT"]
         .sort_values("score", ascending=False)
         .head(4)
     )
@@ -535,8 +521,7 @@ def build_message(df):
     msg.append("")
     msg.append("🌊 FIRST WAVE")
 
-    # UPDATE v41.19: 置換箇所
-    brk = df[df["breakout"] == True].head(4)
+    brk = processed_df[processed_df["breakout"] == True].head(4)
 
     if len(brk):
         for _, row in brk.iterrows():
@@ -546,9 +531,8 @@ def build_message(df):
         
     # DEBUG
     msg.append("")
-    # UPDATE v41.19: 置換箇所
-    msg.append(f"DEBUG SWW RAW:{len(df[df['second_wind_watch'] == True])}")
-    msg.append(f"DEBUG SWS RAW:{len(df[df['second_wind_setup'] == True])}")
+    msg.append(f"DEBUG SWW RAW:{len(processed_df[processed_df['second_wind_watch'] == True])}")
+    msg.append(f"DEBUG SWS RAW:{len(processed_df[processed_df['second_wind_setup'] == True])}")
     
     # =========================
     # SECOND WIND WATCH
@@ -592,9 +576,8 @@ def build_message(df):
     msg.append("")
     msg.append("🌊🔥 SECOND WIND TRIGGER")
 
-    # UPDATE v41.19: 置換箇所
     sw_trigger = (
-        df[df["second_wind_trigger"] == True]
+        processed_df[processed_df["second_wind_trigger"] == True]
         .sort_values("score", ascending=False)
         .head(4)
     )
@@ -615,12 +598,11 @@ def build_message(df):
     msg.append("")
     msg.append("👑 PRIME WINDOW")
 
-    # UPDATE v41.19: 置換箇所
-    prime = df[df["prime_window"] == True].sort_values("score", ascending=False).head(5)
+    prime = processed_df[processed_df["prime_window"] == True].sort_values("buy_score", ascending=False).head(5)
 
     if len(prime):
         for _, row in prime.iterrows():
-            msg.append(f"{row.ticker} S:{row.score:.2f} LT:{row.long_term_bonus:.2f}")
+            msg.append(f"{row.ticker} S:{row.buy_score:.2f} LT:{row.long_term_bonus:.2f}")
     else:
         msg.append("None")
 
@@ -667,33 +649,22 @@ def run():
 
     df = pd.DataFrame(results)
 
-    # UPDATE v42.0: ブール列への上書き汚染を避けるため、対象の数値列のみに限定して一括安全キャスト
+    # UPDATE v42.0: ブール列への上書き汚染を避けるため一括安全キャスト
     num_cols = ["score", "ext", "long_term_bonus", "streak", "yearly_trend_factor"]
     for c in num_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-    # UPDATE v42.1: ④ 銘柄数制御を追加（ノイズ過多・無限増殖の抑止として上位300件にクリップ）
+    # 銘柄数制御（ノイズ過多・無限増殖の抑止として上位300件にクリップ）
     df = df.sort_values("score", ascending=False).head(300)
 
-    # UPDATE v42.0: 修正③（必須） ランキング算出時、NaNによるクラッシュを防ぐために明示的防衛
-    # 300件クリップ後のデータフレームに対して正しく相対順位を再算出
-    buy_rank = df["score"].rank(pct=True).fillna(0)
-
-    # UPDATE v42.0: 修正②（必須） SWS関連フラグの完全な bool 固定
+    # 修正②: 各フラグの完全な bool 固定
     df["second_wind_setup"] = df["second_wind_setup"].astype(bool)
     df["second_wind_watch"] = df["second_wind_watch"].astype(bool)
     df["second_wind_trigger"] = df["second_wind_trigger"].astype(bool)
     df["breakout"] = df["breakout"].astype(bool)
 
-    # UPDATE v42.2: 強制連動条件の適用（second_wind_trigger自体にブレイク要件が内包されたため、より強固なANDへ昇華）
-    df["prime_window"] = (
-        (df["second_wind_trigger"] == True) & 
-        (df["breakout"] == True) & 
-        (df["score"] >= 3.5) & 
-        (buy_rank >= 0.85)
-    )
-
+    # 💡UPDATE v43.0: PRIME WINDOW判定およびメッセージの生成は、交差条件を扱うためbuild_message内部(およびbuild_buy)に完全移管
     text = build_message(df)
 
     print(text)
