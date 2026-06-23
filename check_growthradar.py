@@ -256,10 +256,11 @@ def fetch(ticker):
             )
 
             # =========================
-            # REDIS TIME MODEL
+            # REDIS TIME MODEL & ② 銘柄固定化対策
             # =========================
             delta = 0.0
             streak = 0
+            recent_penalty = 0.0
             today = datetime.now(JST).strftime("%Y-%m-%d")
 
             if r:
@@ -289,6 +290,11 @@ def fetch(ticker):
                         streak = 0
 
                 recent_high_streak = max(recent_high_streak, streak)
+
+                # ② 最近出た銘柄の抑制フィルタ (5日間のローテーション制)
+                last_seen = r.get(f"last_signal:{ticker}")
+                if last_seen and last_seen != today:
+                    recent_penalty = 0.3
 
                 # SAVE
                 r.set(f"score:{ticker}", float(base_score), ex=86400)
@@ -326,18 +332,17 @@ def fetch(ticker):
                 yearly_trend_factor = 0.0
 
             # =========================
-            # SECOND WIND (v41.20 最新刷新)
+            # SECOND WIND (v41.21 最新リファクタ)
             # =========================
-            # ① SWW（観測ゾーン・母集団）: 死なない程度に極限まで広げてトラッキング維持
+            # ① SWW: 追加フィルタ解除・拡張窓による母集団拡大
             second_wind_watch = (
                 (recent_high_streak >= 2) and
-                (streak <= 8) and
                 (phase in ["EARLY", "TRANSITION", "CONT"]) and
-                (extension < 6.5) and
-                (delta > -0.5)
+                (extension < 7.5) and   # ← 6.5 から 7.5 へ拡張
+                (delta > -0.6)          # ← -0.5 から -0.6 へ拡張
             )
 
-            # ② SWS（＝エントリー本体）: 超低リスク圧縮ゾーンの防衛線
+            # ② SWS: エントリー本体（防衛線は維持）
             second_wind_setup = (
                 second_wind_watch and
                 (extension < 2.8) and
@@ -346,13 +351,16 @@ def fetch(ticker):
                 (streak >= 2)
             )
 
-            # ③ SWT（＝遅延確認）: 上に突き抜けた状態の検知用
+            # ③ SWT: 遅延確認
             second_wind_trigger = (
                 second_wind_watch and
                 breakout and
                 (extension >= 3.0) and
                 (vol_ratio > 2.0)
             )
+
+            # ③ SWWでスコア分散を入れる (0〜0.2の揺らぎノイズ)
+            diversity_bonus = np.random.uniform(0, 0.2) if second_wind_watch else 0.0
 
             # クオリティおよびボーナスの算出
             second_wind_quality = (0.6 + 0.4 * yearly_trend_factor)
@@ -371,13 +379,15 @@ def fetch(ticker):
             )
             # ---------------------------------------------------------
 
-            # FINAL SCORE
+            # FINAL SCORE (ペナルティとランダム分散の統合)
             score = (
                 base_score +
                 max(delta, 0) * 0.45 +
                 streak_bonus +
                 second_wind_bonus +
-                long_term_bonus -
+                long_term_bonus +
+                diversity_bonus -     # ランダム性注入
+                recent_penalty -      # 固定化対策ペナルティ
                 ext_penalty
             )
             score = round(float(score), 2)
@@ -397,7 +407,8 @@ def fetch(ticker):
                 "yearly_trend_factor": yearly_trend_factor,
                 "delta": delta,
                 "prime_window": bool(prime_window),
-                "vol_ratio": vol_ratio
+                "vol_ratio": vol_ratio,
+                "recent_penalty": recent_penalty
             }
 
     except Exception as e:
@@ -431,6 +442,9 @@ def build_buy(df):
     )
 
     buy = buy[~((buy["second_wind_setup"]) & (buy["yearly_trend_factor"] == 0))]
+    
+    # ④ 上位固定化を防ぐ重複排除
+    buy = buy.drop_duplicates("ticker")
     buy = buy.sort_values("buy_score", ascending=False)
 
     return buy.head(5)
@@ -444,7 +458,7 @@ def build_message(df):
     sw_setup = df[df.second_wind_setup]
 
     msg = []
-    msg.append("🚀 GrowthRadar v41.20") 
+    msg.append("🚀 GrowthRadar v41.21") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now(JST).strftime('%Y-%m-%d %H:%M')} JST")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -462,8 +476,10 @@ def build_message(df):
         elif row.second_wind_watch:
             tag = " SW👀"
 
+        p_tag = "⚠️" if row.recent_penalty > 0 else ""
+
         msg.append(
-            f"{row.ticker} "
+            f"{row.ticker}{p_tag} "
             f"S:{row.buy_score:.2f} "
             f"LT:{row.long_term_bonus:.2f} "
             f"Streak:{row.streak} "
@@ -570,11 +586,12 @@ def run():
 
     df = pd.DataFrame(results)
 
-    # Redisログ永続化
+    # Redisログ永続化 & シグナル発生記録（次回のペナルティ判定用）
     today = datetime.now(JST).strftime("%Y-%m-%d")
     if r:
         for _, row in df.iterrows():
             try:
+                # ログの永続化
                 r.set(
                     f"sws_log:{row.ticker}:{today}",
                     json.dumps({
@@ -586,6 +603,9 @@ def run():
                     }),
                     ex=86400 * 14
                 )
+                # 今回SWS(セットアップ)を通過した銘柄のシグナルタイムスタンプを記録
+                if row.second_wind_setup:
+                    r.set(f"last_signal:{row.ticker}", today, ex=86400 * 5)
             except:
                 pass
 
