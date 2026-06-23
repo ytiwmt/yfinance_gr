@@ -338,28 +338,18 @@ def fetch(ticker):
                 yearly_trend_factor = 0.0
 
             # =========================
-            # SECOND WIND
+            # SECOND WIND (本質修正)
             # =========================
-            # 修正②: second_wind_watch の extension 条件を < 6.0 に緩和
-            second_wind_watch = (
-                recent_high_streak >= 2 and
-                streak <= 4 and
-                phase in ["TRANSITION", "CONT", "EARLY"] and
-                extension < 6.0 and
-                delta > -0.3
+            second_wind_score = (
+                base_score +
+                streak_bonus +
+                long_term_bonus
             )
 
-            # 修正①: second_wind_setup の閾値を緩和 (recent_high_streak >= 2, extension < 3.5, delta > -0.2)
-            second_wind_setup = (
-                second_wind_watch and
-                extension < 3.5 and
-                delta > -0.2
-            )
-
-            second_wind_trigger = (
-                second_wind_setup and
-                breakout
-            )
+            # スコアベースの判定式へ刷新
+            second_wind_watch = second_wind_score > 1.2
+            second_wind_setup = second_wind_score > 1.5
+            second_wind_trigger = breakout and (second_wind_score > 1.8)
 
             second_wind_quality = (0.6 + 0.4 * yearly_trend_factor)
 
@@ -368,12 +358,13 @@ def fetch(ticker):
                 second_wind_bonus = (0.75 * second_wind_quality)
 
             # ---------------------------------------------------------
-            # PRIME WINDOW DETERMINATION
+            # PRIME WINDOW DETERMINATION (修正① & ②: ANDベース回帰 + 質フィルタ)
             # ---------------------------------------------------------
-            # 修正③: 評価判定を AND から OR（どちらか片方OK）へ変更し、足切りを緩和
             prime_window = (
                 second_wind_setup and
-                (base_score > 1.0 or yearly_trend_factor >= 0.5)
+                (base_score > 1.2) and
+                (yearly_trend_factor >= 0.5) and
+                (streak >= 1)
             )
             # ---------------------------------------------------------
 
@@ -462,7 +453,7 @@ def build_message(df):
     sw_setup = df[df.second_wind_setup]
 
     msg = []
-    msg.append("🚀 GrowthRadar v41.15") 
+    msg.append("🚀 GrowthRadar v41.16") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now(JST).strftime('%Y-%m-%d %H:%M')} JST")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
