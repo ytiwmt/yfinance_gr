@@ -2,12 +2,13 @@ import os
 import requests
 import random
 import re
-import json  # SWSログダンプ用プレースホルダーの維持
+import json
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import numpy as np
+
 
 # =========================
 # CONFIG
@@ -20,21 +21,16 @@ MAX_WORKERS = 12
 MIN_PRICE = 5.0
 MIN_VOL = 300000
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+ETF_BLACKLIST = {
+    "QQQ","ARKK","SOXX","XLF","XLK","XBI","IWM","SPY",
+    "WGMI","QCML","RKLX","INTW","TQQQ","SQQQ","RGTX",
+    "IONX","SOXL","SOXS","ORCX","DLLL","ARKW","ARKG",
+    "QCMU","NBIL","AMDL","IONL","NBIG","MVLL","SMH",
+    "IGV","BOTZ","TAN"
 }
 
-# ETF BLACKLIST
-ETF_BLACKLIST = {
-    "QQQ", "ARKK", "SOXX", "XLF",
-    "XLK", "XBI", "IWM", "SPY",
-    "WGMI", "QCML", "RKLX", "INTW",
-    "TQQQ", "SQQQ", "RGTX","IONX",
-    "SOXL", "SOXS", "ORCX","DLLL",
-    "ARKW", "ARKG", "QCMU","NBIL",
-    "AMDL", "IONL", "NBIG", "MVLL",
-    "SMH", "IGV", "BOTZ", "TAN"
-}
 
 # =========================
 # UNIVERSE
@@ -44,12 +40,10 @@ def load_universe():
 
     try:
         url = "https://raw.githubusercontent.com/datasets/nasdaq-listings/master/data/nasdaq-listed-symbols.csv"
-
         data = requests.get(url, timeout=10).text.splitlines()[1:]
 
         for line in data:
             s = line.split(",")[0].strip().upper()
-
             if re.match(r"^[A-Z]{1,6}$", s):
                 symbols.add(s)
 
@@ -62,42 +56,35 @@ def load_universe():
     ]
 
     symbols.update(fallback)
-
-    # UNIVERSE FILTER (SINGLE RESPONSIBILITY)
     symbols = [s for s in symbols if s not in ETF_BLACKLIST]
 
-    # UPDATE v40.20: FIX SEED BY DATE FOR STABLE DAILY UNIVERSE
     symbols = sorted(symbols)
 
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    random.seed(today)
-
+    random.seed(datetime.utcnow().strftime("%Y-%m-%d"))
     symbols = list(symbols)
     random.shuffle(symbols)
 
     return symbols[:SCAN_SIZE]
 
-# =========================
-# 💡 UPDATE v41.1: streak関数（42.0安定版に差し替え）
-# =========================
-def calc_streak(close):
-    r = pd.Series(close).pct_change().fillna(0)
-    streak = (r > 0).astype(int)
 
-    current = 0
-    max_streak = 0
+# =========================
+# STREAK (CURRENT ONLY)
+# =========================
+def calc_current_streak(close):
+    r = np.diff(close) / close[:-1]
+    streak = 0
 
-    for x in streak:
-        if x:
-            current += 1
-            max_streak = max(max_streak, current)
+    for x in reversed(r):
+        if x > 0:
+            streak += 1
         else:
-            current = 0
+            break
 
-    return max_streak
+    return streak
+
 
 # =========================
-# 💡 UPDATE v41.1: fetch関数（42.0安全版に修正）
+# FETCH
 # =========================
 def fetch(session, ticker):
     try:
@@ -111,102 +98,75 @@ def fetch(session, ticker):
         if not data:
             return None
 
-        indicators = data.get("indicators", {}).get("quote", [{}])[0]
+        ind = data.get("indicators", {}).get("quote", [{}])[0]
 
-        close = indicators.get("close", [])
-        volume = indicators.get("volume", [])
+        close = [x for x in ind.get("close", []) if x is not None]
+        volume = [x for x in ind.get("volume", []) if x is not None]
 
-        close = [x for x in close if x is not None]
-        volume = [x for x in volume if x is not None]
-
-        # ===== 42.0 FIX =====
         if len(close) < 200 or len(volume) < 200:
             return None
 
         price = close[-1]
+
         if price < MIN_PRICE:
             return None
 
         vol_base = np.mean(volume[-20:-5])
-
         if np.isnan(vol_base) or vol_base <= 0:
             return None
         if vol_base < MIN_VOL:
             return None
 
-        # =========================
-        # RETURNS
-        # =========================
         def ret(a, b):
             return (a / b - 1) if b else 0
 
         m1 = ret(close[-1], close[-21])
         m3 = ret(close[-1], close[-63])
-
         vol_ratio = volume[-1] / (vol_base + 1e-9)
 
         # =========================
         # PHASE
         # =========================
         phase = "NONE"
-
-        if (0.25 < m1 < 0.7 and m3 < 0.6):
+        if 0.25 < m1 < 0.7 and m3 < 0.6:
             phase = "EARLY"
-
-        elif (m1 > 0.45 and m3 > 0.45):
+        elif m1 > 0.45 and m3 > 0.45:
             phase = "TRANSITION"
-
-        elif (m3 > 1.0):
+        elif m3 > 1.0:
             phase = "CONT"
 
         # =========================
         # BREAKOUT
         # =========================
         price_jump = abs(close[-1] - close[-2]) / close[-2]
-
-        trend_ok = (
-            close[-1] > close[-2] > close[-3]
-        )
+        trend_ok = close[-1] > close[-2] > close[-3]
 
         breakout = (
-            (
-                price_jump > 0.02 and
-                vol_ratio > 1.8
-            )
-            or
-            (
-                price_jump > 0.015 and
-                vol_ratio > 2.3
-            )
-        ) and trend_ok
+            ((price_jump > 0.02 and vol_ratio > 1.8) or
+             (price_jump > 0.015 and vol_ratio > 2.3))
+            and trend_ok
+        )
 
         # =========================
         # EXTENSION
         # =========================
         ma20 = np.mean(close[-20:])
+        extension = (price / (ma20 + 1e-9) - 1) * 10
 
-        extension = (
-            (close[-1] / (ma20 + 1e-9)) - 1
-        ) * 10
-
-        # ---------------------------------------------------------
-        # MA120 / MA200 & LONG TERM TREND BONUS
-        # ---------------------------------------------------------
+        # =========================
+        # LONG TERM
+        # =========================
         ma120 = np.mean(close[-120:]) if len(close) >= 120 else np.mean(close)
         ma200 = np.mean(close[-200:]) if len(close) >= 200 else np.mean(close)
 
         long_term_bonus = 0.0
-
         if price > ma200:
             long_term_bonus += 0.25
-
-        if len(close) >= 200:
-            if ma120 > ma200:
-                long_term_bonus += 0.25
-        # ---------------------------------------------------------
+        if len(close) >= 200 and ma120 > ma200:
+            long_term_bonus += 0.25
 
         # =========================
-        # BASE SCORE
+        # CORE SCORE
         # =========================
         base_score = (
             m1 * 0.55 +
@@ -216,84 +176,61 @@ def fetch(session, ticker):
         )
 
         # =========================
-        # 💡 UPDATE v41.1: delta安全化（42.0修正） & Redis完全排除によるステートレス化
+        # STATELESS STREAK
+        # =========================
+        streak = calc_current_streak(close)
+        streak_bonus = np.log1p(streak) * 0.05
+
+        # =========================
+        # DELTA (STRUCTURE)
         # =========================
         delta = np.mean(close[-5:]) / np.mean(close[-20:-5]) - 1
-
         if np.isnan(delta) or np.isinf(delta):
             delta = 0.0
 
-        # ステートレスモデルのため、ローカルヒストリーからstreakを計算
-        streak = calc_streak(close)
-        recent_high_streak = streak  # 過去の状態保存がないため現在の最高値を暫定評価
-
         # =========================
-        # STREAK BONUS
-        # =========================
-        streak_bonus = min(streak * 0.18, 0.9)
-
-        # =========================
-        # EXTENSION PENALTY
+        # EXT PENALTY
         # =========================
         ext_penalty = 0.0
-
         if extension > 3.5:
             ext_penalty = 1.0
-
         elif extension > 2.5:
             ext_penalty = 0.5
 
         # =========================
-        # 💡 UPDATE v41.1: yearly returnクラッシュ防止
+        # YEARLY TREND
         # =========================
-        idx_252d = max(-len(close), -252)
-        price_252d_ago = close[idx_252d] if len(close) >= 252 else close[0]
-        yearly_return = (price / price_252d_ago) - 1 if price_252d_ago else 0
+        idx = max(-len(close), -252)
+        base = close[idx] if len(close) >= 252 else close[0]
 
+        yearly_return = (price / base) - 1 if base else 0
         high_52w = max(close)
         high_distance = (price / high_52w) - 1
 
         if yearly_return > 0.3 and high_distance > -0.25:
             yearly_trend_factor = 1.0
-        elif yearly_return > -0.2 and high_distance > -0.4:
+        elif yearly_return > -0.2:
             yearly_trend_factor = 0.5
-        elif yearly_return > -0.45 and high_distance > -0.65:
-            yearly_trend_factor = 0.25
         else:
             yearly_trend_factor = 0.0
 
         # =========================
-        # SECOND WIND
+        # SW (STRUCTURAL REVIVAL)
         # =========================
-        second_wind_watch = (
-            recent_high_streak >= 3 and
-            streak <= 4 and
-            phase in ["TRANSITION", "CONT", "EARLY"] and
-            extension < 5.0 and
-            delta > -0.3
-        )
+        peak_20 = max(close[-20:])
+        drawdown = price / peak_20
 
         second_wind_setup = (
-            second_wind_watch and
-            extension < 3 and
-            delta > -0.15
+            drawdown < 0.9 and
+            delta > -0.15 and
+            extension < 3
         )
 
-        second_wind_trigger = (
-            second_wind_setup and
-            breakout
-        )
-
-        second_wind_quality = (
-            0.6 + 0.4 * yearly_trend_factor
-        )
+        second_wind_trigger = second_wind_setup and breakout
 
         second_wind_bonus = 0.0
         if second_wind_setup:
-            second_wind_bonus = (
-                0.75 *
-                second_wind_quality
-            )
+            second_wind_bonus = 0.75 * (0.6 + 0.4 * yearly_trend_factor)
 
         # =========================
         # FINAL SCORE
@@ -315,23 +252,21 @@ def fetch(session, ticker):
             "score": score,
             "streak": int(streak),
             "breakout": bool(breakout),
-            "ext": round(float(extension), 2),
+            "ext": round(extension, 2),
 
-            "second_wind_watch": bool(second_wind_watch),
-            "second_wind_setup": bool(second_wind_setup),
-            "second_wind_trigger": bool(second_wind_trigger),
-            
+            "second_wind_setup": second_wind_setup,
+            "second_wind_trigger": second_wind_trigger,
+
             "long_term_bonus": round(long_term_bonus, 2),
-            
-            "prime_window": False,
             "yearly_trend_factor": yearly_trend_factor
         }
 
     except:
         return None
 
+
 # =========================
-# BUY
+# BUY SCORE
 # =========================
 def build_buy(df):
     buy = df.copy()
@@ -342,44 +277,21 @@ def build_buy(df):
         (buy["phase"] == "EARLY") * 0.15
     )
 
-    streak_bonus = np.minimum(
-        buy["streak"] * 0.12,
-        0.8
-    )
-
-    ext_penalty = np.maximum(
-        buy["ext"] - 2.5,
-        0
-    ) * 0.35
-
-    second_wind_bonus = (
-        buy["second_wind_setup"] * 0.9
-    )
-
-    buy["prime_bonus"] = buy["prime_window"] * 1.0
+    ext_penalty = np.maximum(buy["ext"] - 2.5, 0) * 0.35
+    second_wind_bonus = buy["second_wind_setup"] * 0.9
 
     buy["buy_score"] = (
         buy["score"] +
         structure_bonus +
-        streak_bonus +
         second_wind_bonus -
-        ext_penalty +
-        buy["prime_bonus"]
+        ext_penalty
     )
 
-    buy = buy[
-        ~(
-            (buy["second_wind_setup"]) &
-            (buy["yearly_trend_factor"] == 0)
-        )
-    ]
+    # freshness penalty
+    buy["buy_score"] *= (1 - buy["ext"].clip(lower=0, upper=5) / 50)
 
-    buy = buy.sort_values(
-        "buy_score",
-        ascending=False
-    )
+    return buy.sort_values("buy_score", ascending=False).head(5)
 
-    return buy.head(5)
 
 # =========================
 # MESSAGE
@@ -387,177 +299,44 @@ def build_buy(df):
 def build_message(df):
     buy = build_buy(df)
 
-    sw_watch = df[df.second_wind_watch]
-    sw_setup = df[df.second_wind_setup]
-
     msg = []
-
-    # 💡 UPDATE v41.1: バージョン表記とコードネームの反映
-    msg.append("🚀 GrowthRadar v41.1 (Pure Cross-Sectional Stateless Model)") 
+    msg.append("🚀 GrowthRadar v42.0 (Structural Hybrid Model)")
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    msg.append("⚠️ Redis: OFF (Stateless System)")
 
     msg.append("")
     msg.append("💎 BUY SIGNAL")
 
-    for _, row in buy.iterrows():
-        tag = ""
-        if row.prime_window:
-            tag = " 👑PRIME"
-        elif row.second_wind_trigger:
-            tag = " SW🔥"
-        elif row.second_wind_setup:
-            tag = " SW🧩"
-        elif row.second_wind_watch:
-            tag = " SW👀"
-
-        msg.append(
-            f"{row.ticker} "
-            f"S:{row.buy_score:.2f} "
-            f"LT:{row.long_term_bonus:.2f} "
-            f"Streak:{row.streak} "
-            f"Ext:{row.ext:.2f}"
-            f"{tag}"
-        )
+    for _, r in buy.iterrows():
+        tag = "SW🧩" if r.second_wind_setup else ""
+        msg.append(f"{r.ticker} S:{r.buy_score:.2f} LT:{r.long_term_bonus:.2f} Ext:{r.ext:.2f} {tag}")
 
     msg.append("")
     msg.append("🔥 EARLY")
 
-    early = (
-        df[df.phase == "EARLY"]
-        .sort_values("score", ascending=False)
-        .head(4)
-    )
-
-    if len(early):
-        for _, row in early.iterrows():
-            msg.append(f"{row.ticker} S:{row.score:.2f}")
-    else:
-        msg.append("None")
+    early = df[df.phase == "EARLY"].sort_values("score", ascending=False).head(4)
+    msg += [f"{x.ticker} S:{x.score:.2f}" for _, x in early.iterrows()] or ["None"]
 
     msg.append("")
     msg.append("⚡ TRANSITION")
 
-    trans = (
-        df[df.phase == "TRANSITION"]
-        .sort_values("score", ascending=False)
-        .head(4)
-    )
-
-    if len(trans):
-        for _, row in trans.iterrows():
-            msg.append(f"{row.ticker} S:{row.score:.2f}")
-    else:
-        msg.append("None")
+    trans = df[df.phase == "TRANSITION"].sort_values("score", ascending=False).head(4)
+    msg += [f"{x.ticker} S:{x.score:.2f}" for _, x in trans.iterrows()] or ["None"]
 
     msg.append("")
     msg.append("🔁 CONT")
 
-    cont = (
-        df[df.phase == "CONT"]
-        .sort_values("score", ascending=False)
-        .head(4)
-    )
+    cont = df[df.phase == "CONT"].sort_values("score", ascending=False).head(4)
+    msg += [f"{x.ticker} S:{x.score:.2f}" for _, x in cont.iterrows()] or ["None"]
 
-    if len(cont):
-        for _, row in cont.iterrows():
-            msg.append(f"{row.ticker} S:{row.score:.2f}")
-    else:
-        msg.append("None")
-
-    # =========================
-    # FIRST WAVE
-    # =========================
     msg.append("")
-    msg.append("🌊 FIRST WAVE")
+    msg.append("🌊 SECOND WIND")
 
-    brk = df[df.breakout].head(4)
-
-    if len(brk):
-        for _, row in brk.iterrows():
-            msg.append(row.ticker)
-    else:
-        msg.append("None")
-        
-    # DEBUG
-    msg.append("")
-    msg.append(f"DEBUG SWW RAW:{len(df[df.second_wind_watch])}")
-    msg.append(f"DEBUG SWS RAW:{len(df[df.second_wind_setup])}")
-    
-    # =========================
-    # SECOND WIND WATCH
-    # =========================
-    msg.append("")
-    msg.append("🌊👀 SECOND WIND WATCH")
-
-    sw_watch_sorted = sw_watch.sort_values("score", ascending=False).head(4)
-
-    if len(sw_watch_sorted):
-        for _, row in sw_watch_sorted.iterrows():
-            msg.append(
-                f"{row.ticker} "
-                f"S:{row.score:.2f} "
-                f"Ext:{row.ext:.2f}"
-            )
-    else:
-        msg.append("None")
-
-    # =========================
-    # SECOND WIND SETUP
-    # =========================
-    msg.append("")
-    msg.append("🌊🧩 SECOND WIND SETUP")
-
-    sw_setup_sorted = sw_setup.sort_values("score", ascending=False).head(4)
-
-    if len(sw_setup_sorted):
-        for _, row in sw_setup_sorted.iterrows():
-            msg.append(
-                f"{row.ticker} "
-                f"S:{row.score:.2f} "
-                f"Ext:{row.ext:.2f}"
-            )
-    else:
-        msg.append("None")
-
-    # =========================
-    # SECOND WIND TRIGGER
-    # =========================
-    msg.append("")
-    msg.append("🌊🔥 SECOND WIND TRIGGER")
-
-    sw_trigger = (
-        df[df.second_wind_trigger]
-        .sort_values("score", ascending=False)
-        .head(4)
-    )
-
-    if len(sw_trigger):
-        for _, row in sw_trigger.iterrows():
-            msg.append(
-                f"{row.ticker} "
-                f"S:{row.score:.2f} "
-                f"Ext:{row.ext:.2f}"
-            )
-    else:
-        msg.append("None")
-
-    # =========================
-    # 👑 PRIME WINDOW
-    # =========================
-    msg.append("")
-    msg.append("👑 PRIME WINDOW")
-
-    prime = df[df.prime_window].sort_values("score", ascending=False).head(5)
-
-    if len(prime):
-        for _, row in prime.iterrows():
-            msg.append(f"{row.ticker} S:{row.score:.2f} LT:{row.long_term_bonus:.2f}")
-    else:
-        msg.append("None")
+    sw = df[df.second_wind_setup].sort_values("score", ascending=False).head(4)
+    msg += [f"{x.ticker} S:{x.score:.2f}" for _, x in sw.iterrows()] or ["None"]
 
     return "\n".join(msg)
+
 
 # =========================
 # RUN
@@ -569,18 +348,13 @@ def run():
     universe = load_universe()
 
     results = []
-
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = {
-            ex.submit(fetch, session, t): t
-            for t in universe
-        }
+        futures = {ex.submit(fetch, session, t): t for t in universe}
 
         for f in as_completed(futures):
-            rlt = f.result()
-
-            if rlt:
-                results.append(rlt)
+            r = f.result()
+            if r:
+                results.append(r)
 
     if not results:
         print("NO DATA")
@@ -588,30 +362,13 @@ def run():
 
     df = pd.DataFrame(results)
 
-    # ---------------------------------------------------------
-    # 💡 UPDATE v41.1: PRIME WINDOWロジックの厳格化
-    # ---------------------------------------------------------
-    buy_rank = df["score"].rank(pct=True)
-
-    df["prime_window"] = (
-        (df["second_wind_setup"] if "second_wind_setup" in df else True) & 
-        (buy_rank >= 0.85) & 
-        (df["yearly_trend_factor"] > 0)
-    )
-    # ---------------------------------------------------------
-
     text = build_message(df)
 
     print(text)
 
     if WEBHOOK_URL:
-        requests.post(
-            WEBHOOK_URL,
-            json={"content": text[:1900]}
-        )
+        requests.post(WEBHOOK_URL, json={"content": text[:1900]})
 
-# =========================
-# MAIN
-# =========================
+
 if __name__ == "__main__":
     run()
