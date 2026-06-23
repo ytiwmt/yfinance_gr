@@ -59,6 +59,17 @@ else:
     print("⚠️ Redis: OFF")
 
 # =========================
+# UTILS (修正①: 強制安全キャスト関数)
+# =========================
+def safe_float(x):
+    try:
+        if isinstance(x, str):
+            x = x.replace("np.float64(", "").replace(")", "")
+        return float(x)
+    except:
+        return None
+
+# =========================
 # UNIVERSE
 # =========================
 def load_universe():
@@ -122,16 +133,19 @@ def fetch(ticker):
             if raw_close is None or raw_volume is None or raw_high is None:
                 return None
 
-            pairs = [
-                (c, v, h)
-                for c, v, h in zip(raw_close, raw_volume, raw_high)
-                if isinstance(c, (int, float))
-                and isinstance(v, (int, float))
-                and isinstance(h, (int, float))
-                and not math.isnan(c)
-                and not math.isnan(v)
-                and not math.isnan(h)
-            ]
+            # 修正②: pairs生成の完全置換による堅牢化
+            pairs = []
+            for c, v, h in zip(raw_close, raw_volume, raw_high):
+                c = safe_float(c)
+                v = safe_float(v)
+                h = safe_float(h)
+
+                if c is None or v is None or h is None:
+                    continue
+                if any(math.isnan(x) for x in [c, v, h]):
+                    continue
+
+                pairs.append((c, v, h))
 
             if len(pairs) < 200:
                 return None
@@ -237,13 +251,11 @@ def fetch(ticker):
                 prev_day = r.get(f"day:{ticker}")
 
                 recent_high_streak = r.get(f"highstreak:{ticker}")
-                # 修正② recent_high_streak 初期値を1に引き上げ
                 recent_high_streak = int(recent_high_streak) if recent_high_streak else 1
 
                 if prev_score is not None:
                     delta = base_score - float(prev_score)
                 
-                # 修正① streakを初回ブースト（Noneなら1、存在すれば既存値をパース）
                 if prev_streak is not None:
                     streak = int(prev_streak)
                 else:
@@ -274,7 +286,6 @@ def fetch(ticker):
                 r.set(f"day:{ticker}", today, ex=86400 * 7)
                 r.set(f"highstreak:{ticker}", recent_high_streak, ex=86400 * 14)
             else:
-                # Redisオフ環境でもロジックが成立するよう初期値を1に固定
                 recent_high_streak = 1
 
             # =========================
@@ -313,7 +324,6 @@ def fetch(ticker):
             # =========================
             # SECOND WIND
             # =========================
-            # 修正③ recent_high_streak の足切りを >= 2 に緩和して現実化
             second_wind_watch = (
                 recent_high_streak >= 2 and
                 streak <= 4 and
@@ -434,7 +444,7 @@ def build_message(df):
     sw_setup = df[df.second_wind_setup]
 
     msg = []
-    msg.append("🚀 GrowthRadar v41.13") 
+    msg.append("🚀 GrowthRadar v41.14") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now(JST).strftime('%Y-%m-%d %H:%M')} JST")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
