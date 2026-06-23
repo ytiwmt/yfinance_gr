@@ -133,7 +133,7 @@ def fetch(ticker):
                 and not math.isnan(h)
             ]
 
-            # 修正① 最低期間の足切りを200本へ緩和
+            # 最低期間の足切りを200本へ緩和
             if len(pairs) < 200:
                 return None
 
@@ -145,7 +145,7 @@ def fetch(ticker):
             if len(close) < 3:
                 return None
 
-            # 修正③ 5日間完全膠着のみを排除
+            # 5日間完全膠着のみを排除
             if len(set(close[-5:])) < 2:
                 return None
 
@@ -160,7 +160,7 @@ def fetch(ticker):
             if np.isnan(vol_base) or vol_base <= 0:
                 return None
 
-            # 修正② 平均出来高制限を0.5倍に緩和
+            # 平均出来高制限を0.5倍に緩和
             if vol_base < (MIN_VOL * 0.5):
                 return None
 
@@ -291,7 +291,6 @@ def fetch(ticker):
             # =========================
             # LONG TERM TREND VALIDATION MODEL
             # =========================
-            # 252日未満の期間に対するインデックス範囲ガード
             idx_252d = max(-len(close), -252)
             price_252d_ago = close[idx_252d]
             yearly_return = (price / (price_252d_ago + 1e-9)) - 1
@@ -319,10 +318,11 @@ def fetch(ticker):
                 delta > -0.3
             )
 
+            # タイポを修正
             second_wind_setup = (
-                second_wind_watch navigate
-                and extension < 3 
-                and delta > -0.15
+                second_wind_watch and
+                extension < 3 and
+                delta > -0.15
             )
 
             second_wind_trigger = (
