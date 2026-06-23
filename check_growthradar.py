@@ -5,6 +5,7 @@ import re
 import redis
 import json
 import math
+import ast
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -59,15 +60,31 @@ else:
     print("⚠️ Redis: OFF")
 
 # =========================
-# UTILS (修正①: 強制安全キャスト関数)
+# UTILS (修正①: 完全パーサ)
 # =========================
 def safe_float(x):
-    try:
-        if isinstance(x, str):
-            x = x.replace("np.float64(", "").replace(")", "")
-        return float(x)
-    except:
+    if x is None:
         return None
+
+    if isinstance(x, (int, float, np.number)):
+        return float(x)
+
+    if isinstance(x, str):
+        # "np.float64(0.123)" を殺す
+        m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", x)
+        if m:
+            try:
+                return float(m.group())
+            except:
+                return None
+
+        # 最後の保険
+        try:
+            return float(ast.literal_eval(x))
+        except:
+            return None
+
+    return None
 
 # =========================
 # UNIVERSE
@@ -133,7 +150,7 @@ def fetch(ticker):
             if raw_close is None or raw_volume is None or raw_high is None:
                 return None
 
-            # 修正②: pairs生成の完全置換による堅牢化
+            # 修正②: 本体修正版 pairs 生成ブロック
             pairs = []
             for c, v, h in zip(raw_close, raw_volume, raw_high):
                 c = safe_float(c)
@@ -142,7 +159,8 @@ def fetch(ticker):
 
                 if c is None or v is None or h is None:
                     continue
-                if any(math.isnan(x) for x in [c, v, h]):
+
+                if math.isnan(c) or math.isnan(v) or math.isnan(h):
                     continue
 
                 pairs.append((c, v, h))
