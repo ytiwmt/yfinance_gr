@@ -60,7 +60,7 @@ else:
     print("⚠️ Redis: OFF")
 
 # =========================
-# UTILS (修正①: 完全パーサ)
+# UTILS
 # =========================
 def safe_float(x):
     if x is None:
@@ -70,7 +70,6 @@ def safe_float(x):
         return float(x)
 
     if isinstance(x, str):
-        # "np.float64(0.123)" を殺す
         m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", x)
         if m:
             try:
@@ -78,7 +77,6 @@ def safe_float(x):
             except:
                 return None
 
-        # 最後の保険
         try:
             return float(ast.literal_eval(x))
         except:
@@ -150,7 +148,7 @@ def fetch(ticker):
             if raw_close is None or raw_volume is None or raw_high is None:
                 return None
 
-            # 修正②: 本体修正版 pairs 生成ブロック
+            # 本質修正: フィルタを完全撤去し純粋なクレンジングのみを実行
             pairs = []
             for c, v, h in zip(raw_close, raw_volume, raw_high):
                 c = safe_float(c)
