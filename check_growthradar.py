@@ -24,8 +24,8 @@ MAX_WORKERS = 12
 MIN_PRICE = 5.0
 MIN_VOL = 300000
 
-# NEW: SW PARAMS
-SW_SETUP_THRESHOLD = 0.2  # second_wind_score - market_mean の閾値（調整可能）
+# SW PARAMS
+SW_SETUP_THRESHOLD = 0.2
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0"
@@ -328,7 +328,7 @@ def fetch(ticker):
                 yearly_trend_factor = 0.0
 
             # =========================
-            # SECOND WIND (ファーストパス: 基本スコア算出)
+            # SECOND WIND SCORE
             # =========================
             second_wind_score = (
                 base_score +
@@ -336,10 +336,16 @@ def fetch(ticker):
                 long_term_bonus
             )
 
-            # クロスセクショナル統計（平均・Zスコア）が必要なため、判定はDataFrame結合後に実施
-            second_wind_watch = second_wind_score > 1.2
+            # 修正①〜④: 基本の watch 判定自体を極めて厳しいフィルターへ刷新
+            second_wind_watch = (
+                (second_wind_score > 1.2) and
+                (recent_high_streak >= 4) and         # ③ streak条件の引き上げ
+                (extension < 2.5) and                 # ① extension上限を半分に
+                (delta > -0.15) and                   # ② delta許容を厳格化
+                (phase in ["TRANSITION", "CONT"])     # ④ EARLYフェーズを完全除外
+            )
 
-            # FINAL SCORE (仮)
+            # FINAL SCORE (仮値)
             score = (
                 base_score +
                 max(delta, 0) * 0.45 +
@@ -357,7 +363,7 @@ def fetch(ticker):
                 "breakout": bool(breakout),
                 "ext": round(float(extension), 2),
                 "second_wind_score": second_wind_score,
-                "second_wind_watch": second_wind_watch,
+                "second_wind_watch": bool(second_wind_watch),
                 "long_term_bonus": round(long_term_bonus, 2),
                 "yearly_trend_factor": yearly_trend_factor,
                 "delta": delta,
@@ -369,39 +375,38 @@ def fetch(ticker):
         return None
 
 # =========================
-# EVALUATE MARKET METRICS (集計・相互フィルタリング)
+# EVALUATE MARKET METRICS
 # =========================
 def evaluate_market_signals(df):
     if df.empty:
         return df
 
-    # 全体の統計量計算
     market_mean = df["second_wind_score"].mean()
     
     score_mean = df["score"].mean()
     score_std = df["score"].std() if df["score"].std() > 0 else 1e-9
     df["score_z"] = (df["score"] - score_mean) / score_std
 
-    # ② SETUP修正: “差分フィルタ”
+    # SETUP条件
     df["second_wind_setup"] = df["second_wind_watch"] & (
         (df["second_wind_score"] - market_mean) > SW_SETUP_THRESHOLD
     )
 
-    # ③ TRIGGER修正: “構造条件”
+    # TRIGGER条件（構造条件）
     df["second_wind_trigger"] = (
         df["breakout"] & 
         (df["ext"] < 3.0) & 
         (df["score_z"] > 1.5)
     )
 
-    # SW Setup ボーナス再計算と最終スコアの確定
+    # SW Setup ボーナス計算
     second_wind_quality = (0.6 + 0.4 * df["yearly_trend_factor"])
     df["second_wind_bonus"] = np.where(df["second_wind_setup"], 0.75 * second_wind_quality, 0.0)
     
     # 最終スコア調整
     df["score"] = round(df["score"] + df["second_wind_bonus"], 2)
 
-    # ① PRIME WINDOW修正: ANDベースに回帰 + 質フィルタ
+    # PRIME WINDOW判定（ANDベース + 質フィルタ）
     df["prime_window"] = (
         df["second_wind_setup"] &
         (df["base_score"] > 1.2) &
@@ -451,7 +456,7 @@ def build_message(df):
     sw_setup = df[df.second_wind_setup]
 
     msg = []
-    msg.append("🚀 GrowthRadar v41.17") 
+    msg.append("🚀 GrowthRadar v41.18") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now(JST).strftime('%Y-%m-%d %H:%M')} JST")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -575,13 +580,10 @@ def run():
         print("NO DATA")
         return
 
-    # DataFrame化
     df = pd.DataFrame(results)
-    
-    # 相互フィルタリング・クロスセクション評価モデルの適用
     df = evaluate_market_signals(df)
 
-    # Redisログ永続化 (統計確定後)
+    # Redisログ
     today = datetime.now(JST).strftime("%Y-%m-%d")
     if r:
         for _, row in df.iterrows():
