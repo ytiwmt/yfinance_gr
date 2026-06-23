@@ -60,7 +60,7 @@ else:
     print("⚠️ Redis: OFF")
 
 # =========================
-# UTILS
+# UTILS / SECTOR MAP (簡易型セクター分類)
 # =========================
 def safe_float(x):
     try:
@@ -85,6 +85,25 @@ def clean_input_float(x):
         except:
             return None
     return None
+
+def get_pseudo_sector(ticker):
+    """ティッカーの傾向から簡易セクターを返却（分散用マッピング）"""
+    # バイオテック関連（文字数長め、特定のアルファベット傾向など）
+    if len(ticker) >= 4 and any(ticker.startswith(p) for p in ["CRBU", "EDIT", "BEAM", "NTLA", "VRTX", "BIIB", "AMGN"]):
+        return "biotech"
+    # 半導体・ハード
+    if ticker in ["NVDA", "AMD", "AVGO", "INTC", "TSM", "ASML", "MU", "AMAT", "LRCX", "KLAC", "ARM", "QCOM"]:
+        return "semiconductors"
+    # ソフトウェア・AI・インターネット
+    if ticker in ["MSFT", "AAPL", "AMZN", "GOOGL", "META", "PLTR", "SNOW", "CRWD", "NET", "DDOG", "TEAM", "WDAY"]:
+        return "software"
+    
+    # 決定できない場合は末尾文字等でマトリックス分散
+    h = hash(ticker) % 4
+    if h == 0: return "biotech"
+    if h == 1: return "semiconductors"
+    if h == 2: return "software"
+    return "other"
 
 # =========================
 # UNIVERSE
@@ -256,12 +275,18 @@ def fetch(ticker):
             )
 
             # =========================
-            # REDIS TIME MODEL & 銘柄固定化対策ペナルティ
+            # REDIS TIME MODEL & 銘柄固定化対策メタデータ
             # =========================
             delta = 0.0
             streak = 0
-            recent_penalty = 0.0
-            today = datetime.now(JST).strftime("%Y-%m-%d")
+            
+            # 修正用の各種ペナルティ初期化
+            cooldown_penalty = 0.0
+            rarity_penalty = 0.0
+            
+            now_dt = datetime.now(JST)
+            today = now_dt.strftime("%Y-%m-%d")
+            yesterday = (now_dt - timedelta(days=1)).strftime("%Y-%m-%d")
 
             if r:
                 prev_score = r.get(f"score:{ticker}")
@@ -280,7 +305,7 @@ def fetch(ticker):
 
                 if prev_day and prev_day != today and prev_score is not None:
                     keep_signal = (
-                        phase in ["TRANSITION", "EARLY"] and  # CONT除外に合わせて同期
+                        phase in ["TRANSITION", "EARLY"] and
                         base_score > 0.9 and
                         delta >= -0.15
                     )
@@ -291,12 +316,16 @@ def fetch(ticker):
 
                 recent_high_streak = max(recent_high_streak, streak)
 
-                # 過去5日以内にSWSシグナル検出履歴がある場合のローテーションペナルティ
-                last_seen = r.get(f"last_signal:{ticker}")
-                if last_seen and last_seen != today:
-                    recent_penalty = 0.3
+                # 🔧 修正①：前日トップ5入り銘柄への超短期強烈ペナルティ（クールダウン）
+                if r.get(f"last_top:{ticker}") == yesterday:
+                    cooldown_penalty = 0.3
 
-                # SAVE
+                # 🔧 修正③：スコアに“希少性ペナルティ”（出現頻度過多への累積パニッシュ）
+                freq = r.get(f"freq:{ticker}")
+                freq = int(freq) if freq else 0
+                rarity_penalty = min(freq * 0.1, 0.5)
+
+                # SAVE (基本情報の保存)
                 r.set(f"score:{ticker}", float(base_score), ex=86400)
                 r.set(f"streak:{ticker}", int(streak), ex=86400 * 7)
                 r.set(f"day:{ticker}", today, ex=86400 * 7)
@@ -332,25 +361,22 @@ def fetch(ticker):
                 yearly_trend_factor = 0.0
 
             # =========================
-            # SECOND WIND (v41.24 状態機械・最新鋭コアリファクタ)
+            # SECOND WIND (状態機械コアロジック)
             # =========================
-            # 🔧 修正①: SWWを“半分殺す”（CONT除外、出来高・拡張度をタイト化）
             second_wind_watch = (
                 (phase in ["TRANSITION", "EARLY"]) and
                 (extension < 5.5) and
                 (vol_ratio > 1.2)
             )
 
-            # 🔧 修正②: SWSをコア（実質的な買い候補）に昇格
             second_wind_setup = (
                 second_wind_watch and
                 (streak >= 3) and
-                (0.05 < delta < 0.25) and  # 絶妙な右肩上がりヨコヨコ
+                (0.05 < delta < 0.25) and
                 (extension < 2.5) and
                 (vol_ratio > 1.5)
             )
 
-            # 🔧 修正③: SWTはSWSベースの超限定“確認用”に落とす
             second_wind_trigger = (
                 second_wind_setup and
                 breakout and
@@ -358,7 +384,7 @@ def fetch(ticker):
             )
 
             # ---------------------------------------------------------
-            # ■ SWを状態機械（State Machine）にする (優先順位制)
+            # 優先順位ステートマシン決定
             # ---------------------------------------------------------
             sw_state = "NONE"
             if second_wind_trigger:
@@ -376,6 +402,8 @@ def fetch(ticker):
             second_wind_bonus = 0.0
             if sw_state == "SWS":
                 second_wind_bonus = (0.75 * second_wind_quality)
+                # 🔧 修正⑤：SWは“減衰型”にする (同一銘柄のSW連打に伴う優位性低下を再現)
+                second_wind_bonus *= (1.0 - min(streak * 0.05, 0.5))
 
             # ---------------------------------------------------------
             # PRIME WINDOW DETERMINATION
@@ -388,7 +416,7 @@ def fetch(ticker):
             )
             # ---------------------------------------------------------
 
-            # FINAL SCORE の決定
+            # FINAL SCORE の決定 (各種固定化ペナルティをブレンド)
             score = (
                 base_score +
                 max(delta, 0) * 0.45 +
@@ -396,7 +424,8 @@ def fetch(ticker):
                 second_wind_bonus +
                 long_term_bonus +
                 diversity_bonus -
-                recent_penalty -
+                cooldown_penalty -   # 前日トップペナルティ
+                rarity_penalty -     # 頻出ペナルティ
                 ext_penalty
             )
             score = round(float(score), 2)
@@ -415,7 +444,7 @@ def fetch(ticker):
                 "delta": delta,
                 "prime_window": bool(prime_window),
                 "vol_ratio": vol_ratio,
-                "recent_penalty": recent_penalty
+                "pseudo_sector": get_pseudo_sector(ticker)
             }
 
     except Exception as e:
@@ -435,7 +464,6 @@ def build_buy(df):
     streak_bonus = np.minimum(buy["streak"] * 0.12, 0.8)
     ext_penalty = np.maximum(buy["ext"] - 2.5, 0) * 0.35
 
-    # BUYからSWを完全分離
     buy["buy_score"] = (
         buy["score"] +
         structure_bonus +
@@ -443,10 +471,37 @@ def build_buy(df):
         ext_penalty
     )
 
-    buy = buy.drop_duplicates("ticker")
+    # スコア順に並び替え
     buy = buy.sort_values("buy_score", ascending=False)
 
-    return buy.head(5)
+    # 🔧 修正②＆④：ランキング重複制限 ＆ セクター重複制限の同時適用
+    selected_tickers = set()
+    sector_counts = {}
+    final_rows = []
+
+    for _, row in buy.iterrows():
+        ticker = row["ticker"]
+        sector = row["pseudo_sector"]
+
+        # 🔧 重複銘柄排除
+        if ticker in selected_tickers:
+            continue
+        
+        # 🔧 同一セクター上位制限（同じテーマばかり選ばれるのを最大2個までに規制）
+        if sector_counts.get(sector, 0) >= 2:
+            continue
+
+        selected_tickers.add(ticker)
+        sector_counts[sector] = sector_counts.get(sector, 0) + 1
+        final_rows.append(row)
+
+        if len(final_rows) >= 5:
+            break
+
+    if not final_rows:
+        return pd.DataFrame()
+        
+    return pd.DataFrame(final_rows)
 
 # =========================
 # MESSAGE
@@ -454,26 +509,24 @@ def build_buy(df):
 def build_message(df):
     buy = build_buy(df)
     
-    # 状態機械に基づいたマッピング抽出
     sw_watch = df[df.sw_state == "SWW"]
     sw_setup = df[df.sw_state == "SWS"]
     sw_trigger = df[df.sw_state == "SWT"]
     prime = df[df.prime_window]
 
     msg = []
-    msg.append("🚀 GrowthRadar v41.24") 
+    msg.append("🚀 GrowthRadar v41.25") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now(JST).strftime('%Y-%m-%d %H:%M')} JST")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
 
     msg.append("")
-    msg.append("💎 BUY SIGNAL")
+    msg.append("💎 BUY SIGNAL (DIVERSIFIED)")
     for _, row in buy.iterrows():
-        p_tag = "⚠️" if row.recent_penalty > 0 else ""
         msg.append(
-            f"{row.ticker}{p_tag} "
+            f"{row.ticker} "
             f"S:{row.buy_score:.2f} "
-            f"LT:{row.long_term_bonus:.2f} "
+            f"SEC:{row.pseudo_sector} "
             f"Streak:{row.streak} "
             f"Ext:{row.ext:.2f}"
         )
@@ -579,10 +632,20 @@ def run():
         return
 
     df = pd.DataFrame(results)
+    buy = build_buy(df)
 
-    # Redisログ永続化 & シグナル発生記録
+    # Redisを用いたローテーションログ管理の更新
     today = datetime.now(JST).strftime("%Y-%m-%d")
     if r:
+        # 今日のトップ5銘柄を確定・記録（明日のコールドペナルティ判定用）
+        if not buy.empty:
+            for _, row in buy.iterrows():
+                try:
+                    r.set(f"last_top:{row.ticker}", today, ex=86400 * 3)
+                except:
+                    pass
+
+        # 全銘柄の永続ログ＆頻度（freq）のインクリメント加算
         for _, row in df.iterrows():
             try:
                 r.set(
@@ -596,9 +659,15 @@ def run():
                     }),
                     ex=86400 * 14
                 )
-                # 状態機械がSWS(確実なセットアップ)に達した時のみペナルティ用フラグを記録
+                
+                # SWS（コアセットアップ状態）が持続している場合は頻度をプラス、そうでない日はゆっくりリパトリエーション（減衰）
                 if row.sw_state == "SWS":
-                    r.set(f"last_signal:{row.ticker}", today, ex=86400 * 5)
+                    r.incrby(f"freq:{row.ticker}", 1)
+                    r.expire(f"freq:{row.ticker}", 86400 * 7) # 有効期限延長
+                else:
+                    current_freq = r.get(f"freq:{row.ticker}")
+                    if current_freq and int(current_freq) > 0:
+                        r.decrby(f"freq:{row.ticker}", 1)
             except:
                 pass
 
