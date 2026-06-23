@@ -326,18 +326,18 @@ def fetch(ticker):
                 yearly_trend_factor = 0.0
 
             # =========================
-            # SECOND WIND (最新刷新ロジック)
+            # SECOND WIND (v41.20 最新刷新)
             # =========================
-            # ① SWW（観測ゾーン・母集団）：広く残す
+            # ① SWW（観測ゾーン・母集団）: 死なない程度に極限まで広げてトラッキング維持
             second_wind_watch = (
-                (recent_high_streak >= 3) and
-                (streak <= 6) and
+                (recent_high_streak >= 2) and
+                (streak <= 8) and
                 (phase in ["EARLY", "TRANSITION", "CONT"]) and
-                (extension < 5.0) and
-                (delta > -0.3)
+                (extension < 6.5) and
+                (delta > -0.5)
             )
 
-            # ② SWS（＝エントリー本体）：唯一の買い場（圧縮・安定トレンド）
+            # ② SWS（＝エントリー本体）: 超低リスク圧縮ゾーンの防衛線
             second_wind_setup = (
                 second_wind_watch and
                 (extension < 2.8) and
@@ -346,7 +346,7 @@ def fetch(ticker):
                 (streak >= 2)
             )
 
-            # ③ SWT（＝遅延確認・基本ノートレード）：すでに伸びている
+            # ③ SWT（＝遅延確認）: 上に突き抜けた状態の検知用
             second_wind_trigger = (
                 second_wind_watch and
                 breakout and
@@ -371,7 +371,7 @@ def fetch(ticker):
             )
             # ---------------------------------------------------------
 
-            # FINAL SCORE の確定
+            # FINAL SCORE
             score = (
                 base_score +
                 max(delta, 0) * 0.45 +
@@ -444,7 +444,7 @@ def build_message(df):
     sw_setup = df[df.second_wind_setup]
 
     msg = []
-    msg.append("🚀 GrowthRadar v41.19") 
+    msg.append("🚀 GrowthRadar v41.20") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now(JST).strftime('%Y-%m-%d %H:%M')} JST")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
