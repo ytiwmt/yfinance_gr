@@ -62,13 +62,19 @@ else:
 # =========================
 # UTILS
 # =========================
+# 修正③: 読み込み・計算用の防御パーサ
 def safe_float(x):
+    try:
+        return float(str(x).replace("np.float64(", "").replace(")", ""))
+    except:
+        return 0.0
+
+# プログラム全体の入力クレンジング用パーサ（維持）
+def clean_input_float(x):
     if x is None:
         return None
-
     if isinstance(x, (int, float, np.number)):
         return float(x)
-
     if isinstance(x, str):
         m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", x)
         if m:
@@ -76,12 +82,10 @@ def safe_float(x):
                 return float(m.group())
             except:
                 return None
-
         try:
             return float(ast.literal_eval(x))
         except:
             return None
-
     return None
 
 # =========================
@@ -148,12 +152,11 @@ def fetch(ticker):
             if raw_close is None or raw_volume is None or raw_high is None:
                 return None
 
-            # 本質修正: フィルタを完全撤去し純粋なクレンジングのみを実行
             pairs = []
             for c, v, h in zip(raw_close, raw_volume, raw_high):
-                c = safe_float(c)
-                v = safe_float(v)
-                h = safe_float(h)
+                c = clean_input_float(c)
+                v = clean_input_float(v)
+                h = clean_input_float(h)
 
                 if c is None or v is None or h is None:
                     continue
@@ -269,13 +272,13 @@ def fetch(ticker):
                 recent_high_streak = r.get(f"highstreak:{ticker}")
                 recent_high_streak = int(recent_high_streak) if recent_high_streak else 1
 
-                if prev_score is not None:
-                    delta = base_score - float(prev_score)
+                # 修正③: 読み込み防御キャストを適用
+                delta = base_score - safe_float(prev_score) if prev_score else 0.0
                 
                 if prev_streak is not None:
                     streak = int(prev_streak)
                 else:
-                    streak = 1
+                    streak = 1  # 初回ブースト
 
                 # =========================
                 # STREAK FIX
@@ -296,11 +299,11 @@ def fetch(ticker):
                 # =========================
                 recent_high_streak = max(recent_high_streak, streak)
 
-                # SAVE
-                r.set(f"score:{ticker}", base_score, ex=86400)
-                r.set(f"streak:{ticker}", streak, ex=86400 * 7)
+                # 修正①: 保存データを必ずネイティブ型に強制キャスト
+                r.set(f"score:{ticker}", float(base_score), ex=86400)
+                r.set(f"streak:{ticker}", int(streak), ex=86400 * 7)
                 r.set(f"day:{ticker}", today, ex=86400 * 7)
-                r.set(f"highstreak:{ticker}", recent_high_streak, ex=86400 * 14)
+                r.set(f"highstreak:{ticker}", int(recent_high_streak), ex=86400 * 14)
             else:
                 recent_high_streak = 1
 
@@ -375,13 +378,14 @@ def fetch(ticker):
             )
             # ---------------------------------------------------------
 
+            # 修正②: JSON保存データもネイティブ型へキャストして保存
             if r:
                 r.set(
                     f"sws_log:{ticker}:{today}",
                     json.dumps({
-                        "extension": extension,
-                        "streak": streak,
-                        "delta": delta,
+                        "extension": float(extension),
+                        "streak": int(streak),
+                        "delta": float(delta),
                         "phase": phase,
                         "hit": bool(second_wind_setup)
                     }),
