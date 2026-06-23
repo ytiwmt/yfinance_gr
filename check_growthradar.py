@@ -280,7 +280,7 @@ def fetch(ticker):
 
                 if prev_day and prev_day != today and prev_score is not None:
                     keep_signal = (
-                        phase in ["TRANSITION", "CONT"] and
+                        phase in ["TRANSITION", "EARLY"] and  # CONT除外に合わせて同期
                         base_score > 0.9 and
                         delta >= -0.15
                     )
@@ -291,7 +291,7 @@ def fetch(ticker):
 
                 recent_high_streak = max(recent_high_streak, streak)
 
-                # 過去5日以内にシグナル検出履歴がある場合のローテーションペナルティ
+                # 過去5日以内にSWSシグナル検出履歴がある場合のローテーションペナルティ
                 last_seen = r.get(f"last_signal:{ticker}")
                 if last_seen and last_seen != today:
                     recent_penalty = 0.3
@@ -332,28 +332,41 @@ def fetch(ticker):
                 yearly_trend_factor = 0.0
 
             # =========================
-            # SECOND WIND (v41.22 正しい設計・責務の分離)
+            # SECOND WIND (v41.24 状態機械・最新鋭コアリファクタ)
             # =========================
-            # ① SWW (観測ゾーン): トレンド株を広く無条件で残す
+            # 🔧 修正①: SWWを“半分殺す”（CONT除外、出来高・拡張度をタイト化）
             second_wind_watch = (
-                (phase in ["EARLY", "TRANSITION", "CONT"]) and
-                (extension < 8.0)
+                (phase in ["TRANSITION", "EARLY"]) and
+                (extension < 5.5) and
+                (vol_ratio > 1.2)
             )
 
-            # ② SWS (エントリー本体): ここで初めて厳しい条件で精度を担保
+            # 🔧 修正②: SWSをコア（実質的な買い候補）に昇格
             second_wind_setup = (
                 second_wind_watch and
-                (streak >= 2) and
-                (delta > -0.15) and
-                (extension < 3.0)
+                (streak >= 3) and
+                (0.05 < delta < 0.25) and  # 絶妙な右肩上がりヨコヨコ
+                (extension < 2.5) and
+                (vol_ratio > 1.5)
             )
 
-            # ③ SWT (遅延確認): 上に抜け出た状態の検出
+            # 🔧 修正③: SWTはSWSベースの超限定“確認用”に落とす
             second_wind_trigger = (
-                second_wind_watch and
+                second_wind_setup and
                 breakout and
-                (delta > 0.0)
+                (yearly_trend_factor >= 0.5)
             )
+
+            # ---------------------------------------------------------
+            # ■ SWを状態機械（State Machine）にする (優先順位制)
+            # ---------------------------------------------------------
+            sw_state = "NONE"
+            if second_wind_trigger:
+                sw_state = "SWT"
+            elif second_wind_setup:
+                sw_state = "SWS"
+            elif second_wind_watch:
+                sw_state = "SWW"
 
             # スコア分散の揺らぎノイズ (0〜0.2)
             diversity_bonus = np.random.uniform(0, 0.2) if second_wind_watch else 0.0
@@ -361,14 +374,14 @@ def fetch(ticker):
             # クオリティボーナス算出
             second_wind_quality = (0.6 + 0.4 * yearly_trend_factor)
             second_wind_bonus = 0.0
-            if second_wind_setup:
+            if sw_state == "SWS":
                 second_wind_bonus = (0.75 * second_wind_quality)
 
             # ---------------------------------------------------------
             # PRIME WINDOW DETERMINATION
             # ---------------------------------------------------------
             prime_window = (
-                second_wind_setup and
+                (sw_state == "SWS") and
                 (base_score > 1.2) and
                 (yearly_trend_factor >= 0.5) and
                 (streak >= 1)
@@ -396,9 +409,7 @@ def fetch(ticker):
                 "streak": int(streak),
                 "breakout": bool(breakout),
                 "ext": round(float(extension), 2),
-                "second_wind_watch": bool(second_wind_watch),
-                "second_wind_setup": bool(second_wind_setup),
-                "second_wind_trigger": bool(second_wind_trigger),
+                "sw_state": sw_state,
                 "long_term_bonus": round(long_term_bonus, 2),
                 "yearly_trend_factor": yearly_trend_factor,
                 "delta": delta,
@@ -419,27 +430,19 @@ def build_buy(df):
 
     structure_bonus = (
         (buy["phase"] == "TRANSITION").astype(int) * 0.7 +
-        (buy["phase"] == "CONT").astype(int) * 0.45 +
         (buy["phase"] == "EARLY").astype(int) * 0.15
     )
     streak_bonus = np.minimum(buy["streak"] * 0.12, 0.8)
     ext_penalty = np.maximum(buy["ext"] - 2.5, 0) * 0.35
-    second_wind_bonus = (buy["second_wind_setup"] * 0.9)
 
-    buy["prime_bonus"] = buy["prime_window"] * 1.0
-
+    # BUYからSWを完全分離
     buy["buy_score"] = (
         buy["score"] +
         structure_bonus +
-        streak_bonus +
-        second_wind_bonus -
-        ext_penalty +
-        buy["prime_bonus"]
+        streak_bonus -
+        ext_penalty
     )
 
-    buy = buy[~((buy["second_wind_setup"]) & (buy["yearly_trend_factor"] == 0))]
-    
-    # 銘柄の重複排除による上位固定化ブロック
     buy = buy.drop_duplicates("ticker")
     buy = buy.sort_values("buy_score", ascending=False)
 
@@ -450,11 +453,15 @@ def build_buy(df):
 # =========================
 def build_message(df):
     buy = build_buy(df)
-    sw_watch = df[df.second_wind_watch]
-    sw_setup = df[df.second_wind_setup]
+    
+    # 状態機械に基づいたマッピング抽出
+    sw_watch = df[df.sw_state == "SWW"]
+    sw_setup = df[df.sw_state == "SWS"]
+    sw_trigger = df[df.sw_state == "SWT"]
+    prime = df[df.prime_window]
 
     msg = []
-    msg.append("🚀 GrowthRadar v41.22") 
+    msg.append("🚀 GrowthRadar v41.24") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now(JST).strftime('%Y-%m-%d %H:%M')} JST")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -462,25 +469,13 @@ def build_message(df):
     msg.append("")
     msg.append("💎 BUY SIGNAL")
     for _, row in buy.iterrows():
-        tag = ""
-        if row.prime_window:
-            tag = " 👑PRIME"
-        elif row.second_wind_trigger:
-            tag = " SW🔥"
-        elif row.second_wind_setup:
-            tag = " SW🧩"
-        elif row.second_wind_watch:
-            tag = " SW👀"
-
         p_tag = "⚠️" if row.recent_penalty > 0 else ""
-
         msg.append(
             f"{row.ticker}{p_tag} "
             f"S:{row.buy_score:.2f} "
             f"LT:{row.long_term_bonus:.2f} "
             f"Streak:{row.streak} "
             f"Ext:{row.ext:.2f}"
-            f"{tag}"
         )
 
     msg.append("")
@@ -520,9 +515,12 @@ def build_message(df):
         msg.append("None")
         
     msg.append("")
-    msg.append(f"DEBUG SWW RAW:{len(df[df.second_wind_watch])}")
-    msg.append(f"DEBUG SWS RAW:{len(df[df.second_wind_setup])}")
+    msg.append(f"DEBUG SWW STATE RAW:{len(sw_watch)}")
+    msg.append(f"DEBUG SWS STATE RAW:{len(sw_setup)}")
     
+    # ---------------------------------------------------------
+    # SW 独立セクション運用
+    # ---------------------------------------------------------
     msg.append("")
     msg.append("🌊👀 SECOND WIND WATCH")
     sw_watch_sorted = sw_watch.sort_values("score", ascending=False).head(4)
@@ -533,28 +531,28 @@ def build_message(df):
         msg.append("None")
 
     msg.append("")
-    msg.append("🌊🧩 SECOND WIND SETUP")
+    msg.append("🌊🧩 SECOND WIND SETUP (CORE)")
     sw_setup_sorted = sw_setup.sort_values("score", ascending=False).head(4)
     if len(sw_setup_sorted):
         for _, row in sw_setup_sorted.iterrows():
-            msg.append(f"{row.ticker} S:{row.score:.2f} Ext:{row.ext:.2f}")
+            msg.append(f"{row.ticker} S:{row.score:.2f} Ext:{row.ext:.2f} D:{row.delta:.3f}")
     else:
         msg.append("None")
 
     msg.append("")
-    msg.append("🌊🔥 SECOND WIND TRIGGER")
-    sw_trigger = df[df.second_wind_trigger].sort_values("score", ascending=False).head(4)
-    if len(sw_trigger):
-        for _, row in sw_trigger.iterrows():
+    msg.append("🌊🔥 SECOND WIND TRIGGER (LIMITED)")
+    sw_trigger_sorted = sw_trigger.sort_values("score", ascending=False).head(4)
+    if len(sw_trigger_sorted):
+        for _, row in sw_trigger_sorted.iterrows():
             msg.append(f"{row.ticker} S:{row.score:.2f} Ext:{row.ext:.2f}")
     else:
         msg.append("None")
 
     msg.append("")
     msg.append("👑 PRIME WINDOW")
-    prime = df[df.prime_window].sort_values("score", ascending=False).head(5)
-    if len(prime):
-        for _, row in prime.iterrows():
+    prime_sorted = prime.sort_values("score", ascending=False).head(5)
+    if len(prime_sorted):
+        for _, row in prime_sorted.iterrows():
             msg.append(f"{row.ticker} S:{row.score:.2f} LT:{row.long_term_bonus:.2f}")
     else:
         msg.append("None")
@@ -582,7 +580,7 @@ def run():
 
     df = pd.DataFrame(results)
 
-    # Redisログ永続化 & 次回用シグナル記録
+    # Redisログ永続化 & シグナル発生記録
     today = datetime.now(JST).strftime("%Y-%m-%d")
     if r:
         for _, row in df.iterrows():
@@ -594,11 +592,12 @@ def run():
                         "streak": int(row.streak),
                         "delta": float(row.delta),
                         "phase": row.phase,
-                        "hit": bool(row.second_wind_setup)
+                        "state": row.sw_state
                     }),
                     ex=86400 * 14
                 )
-                if row.second_wind_setup:
+                # 状態機械がSWS(確実なセットアップ)に達した時のみペナルティ用フラグを記録
+                if row.sw_state == "SWS":
                     r.set(f"last_signal:{row.ticker}", today, ex=86400 * 5)
             except:
                 pass
