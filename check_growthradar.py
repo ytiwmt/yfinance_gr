@@ -114,7 +114,6 @@ def fetch(ticker):
 
             data = data_block[0]
 
-            # 防御的パース（high も取得）
             indicators = data.get("indicators", {}).get("quote", [{}])[0]
             raw_close = indicators.get("close")
             raw_volume = indicators.get("volume")
@@ -123,7 +122,6 @@ def fetch(ticker):
             if raw_close is None or raw_volume is None or raw_high is None:
                 return None
 
-            # クレンジング（close, volume, high すべての型とNaNを厳密にチェック）
             pairs = [
                 (c, v, h)
                 for c, v, h in zip(raw_close, raw_volume, raw_high)
@@ -135,7 +133,8 @@ def fetch(ticker):
                 and not math.isnan(h)
             ]
 
-            if len(pairs) < 252:
+            # 修正① 最低期間の足切りを200本へ緩和
+            if len(pairs) < 200:
                 return None
 
             close, volume, high = zip(*pairs)
@@ -146,7 +145,8 @@ def fetch(ticker):
             if len(close) < 3:
                 return None
 
-            if len(set(close[-5:])) < 3:
+            # 修正③ 5日間完全膠着のみを排除
+            if len(set(close[-5:])) < 2:
                 return None
 
             price = close[-1]
@@ -160,7 +160,8 @@ def fetch(ticker):
             if np.isnan(vol_base) or vol_base <= 0:
                 return None
 
-            if vol_base < MIN_VOL:
+            # 修正② 平均出来高制限を0.5倍に緩和
+            if vol_base < (MIN_VOL * 0.5):
                 return None
 
             # =========================
@@ -290,11 +291,12 @@ def fetch(ticker):
             # =========================
             # LONG TERM TREND VALIDATION MODEL
             # =========================
-            price_252d_ago = close[-252]
+            # 252日未満の期間に対するインデックス範囲ガード
+            idx_252d = max(-len(close), -252)
+            price_252d_ago = close[idx_252d]
             yearly_return = (price / (price_252d_ago + 1e-9)) - 1
 
-            # high（日中最高値）ベースの52週高値
-            high_52w = max(high[-252:])
+            high_52w = max(high[-252:]) if len(high) >= 252 else max(high)
             high_distance = (price / (high_52w + 1e-9)) - 1
 
             if yearly_return > 0.3 and high_distance > -0.25:
@@ -318,9 +320,9 @@ def fetch(ticker):
             )
 
             second_wind_setup = (
-                second_wind_watch and
-                extension < 3 and
-                delta > -0.15
+                second_wind_watch navigate
+                and extension < 3 
+                and delta > -0.15
             )
 
             second_wind_trigger = (
@@ -429,7 +431,7 @@ def build_message(df):
     sw_setup = df[df.second_wind_setup]
 
     msg = []
-    msg.append("🚀 GrowthRadar v41.11 (PRIME WINDOW MODEL - TRULY FINAL)") 
+    msg.append("🚀 GrowthRadar v41.12") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now(JST).strftime('%Y-%m-%d %H:%M')} JST")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
