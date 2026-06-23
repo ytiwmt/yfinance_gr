@@ -62,14 +62,12 @@ else:
 # =========================
 # UTILS
 # =========================
-# 修正③: 読み込み・計算用の防御パーサ
 def safe_float(x):
     try:
         return float(str(x).replace("np.float64(", "").replace(")", ""))
     except:
         return 0.0
 
-# プログラム全体の入力クレンジング用パーサ（維持）
 def clean_input_float(x):
     if x is None:
         return None
@@ -272,13 +270,12 @@ def fetch(ticker):
                 recent_high_streak = r.get(f"highstreak:{ticker}")
                 recent_high_streak = int(recent_high_streak) if recent_high_streak else 1
 
-                # 修正③: 読み込み防御キャストを適用
                 delta = base_score - safe_float(prev_score) if prev_score else 0.0
                 
                 if prev_streak is not None:
                     streak = int(prev_streak)
                 else:
-                    streak = 1  # 初回ブースト
+                    streak = 1
 
                 # =========================
                 # STREAK FIX
@@ -299,7 +296,7 @@ def fetch(ticker):
                 # =========================
                 recent_high_streak = max(recent_high_streak, streak)
 
-                # 修正①: 保存データを必ずネイティブ型に強制キャスト
+                # SAVE
                 r.set(f"score:{ticker}", float(base_score), ex=86400)
                 r.set(f"streak:{ticker}", int(streak), ex=86400 * 7)
                 r.set(f"day:{ticker}", today, ex=86400 * 7)
@@ -343,18 +340,20 @@ def fetch(ticker):
             # =========================
             # SECOND WIND
             # =========================
+            # 修正②: second_wind_watch の extension 条件を < 6.0 に緩和
             second_wind_watch = (
                 recent_high_streak >= 2 and
                 streak <= 4 and
                 phase in ["TRANSITION", "CONT", "EARLY"] and
-                extension < 5.0 and
+                extension < 6.0 and
                 delta > -0.3
             )
 
+            # 修正①: second_wind_setup の閾値を緩和 (recent_high_streak >= 2, extension < 3.5, delta > -0.2)
             second_wind_setup = (
                 second_wind_watch and
-                extension < 3 and
-                delta > -0.15
+                extension < 3.5 and
+                delta > -0.2
             )
 
             second_wind_trigger = (
@@ -371,14 +370,13 @@ def fetch(ticker):
             # ---------------------------------------------------------
             # PRIME WINDOW DETERMINATION
             # ---------------------------------------------------------
+            # 修正③: 評価判定を AND から OR（どちらか片方OK）へ変更し、足切りを緩和
             prime_window = (
                 second_wind_setup and
-                base_score > 1.0 and
-                yearly_trend_factor > 0
+                (base_score > 1.0 or yearly_trend_factor >= 0.5)
             )
             # ---------------------------------------------------------
 
-            # 修正②: JSON保存データもネイティブ型へキャストして保存
             if r:
                 r.set(
                     f"sws_log:{ticker}:{today}",
@@ -464,7 +462,7 @@ def build_message(df):
     sw_setup = df[df.second_wind_setup]
 
     msg = []
-    msg.append("🚀 GrowthRadar v41.14") 
+    msg.append("🚀 GrowthRadar v41.15") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now(JST).strftime('%Y-%m-%d %H:%M')} JST")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
