@@ -47,7 +47,7 @@ if REDIS_URL:
     try:
         r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
         r.ping()
-        print("🟢 Redis: CONNECTED (v40.20 Restricted State Mode)")
+        print("🟢 Redis: CONNECTED (v40.19 Baseline Mode)")
     except:
         print("🔴 Redis: FAILED")
         r = None
@@ -153,21 +153,18 @@ def fetch(session, ticker):
         ma20 = np.mean(close[-20:])
         extension = ((close[-1] / (ma20 + 1e-9)) - 1) * 10
 
-        # 💡 STEP 1：base_scoreを元のシンプルな形に戻す（41系の追加要素を完全削除）
+        # BASE SCORE
         base_score = (
-            m1 * 0.6 +
-            m3 * 0.3 +
-            vol_ratio * 0.1 +
-            breakout * 0.3
+            m1 * 0.55 +
+            m3 * 0.25 +
+            vol_ratio * 0.10 +
+            breakout * 0.35
         )
 
-        # 💡 STEP 2：deltaを大幅に弱体化（0.45 → 0.1以下へ抑制）
         delta = np.mean(close[-5:]) / np.mean(close[-20:-5]) - 1
         if np.isnan(delta) or np.isinf(delta):
             delta = 0.0
-        delta_bonus = max(delta, 0) * 0.1
 
-        # 💡 STEP 3：streakの“飾り化”（上限0.3の線形構造、過剰な対数ボーナスを抑制）
         r_diff = np.diff(close[-10:])
         streak = 0
         for x in reversed(r_diff):
@@ -175,7 +172,7 @@ def fetch(session, ticker):
                 streak += 1
             else:
                 break
-        streak_bonus = min(streak * 0.05, 0.3)
+        streak_bonus = np.log1p(streak) * 0.05
 
         ext_penalty = 0.0
         if extension > 3.5:
@@ -183,33 +180,30 @@ def fetch(session, ticker):
         elif extension > 2.5:
             ext_penalty = 0.5
 
-        # 💡 STEP 5：SWを「出力専用（Label Only）」に変更。スコアへの加算影響を一切排除
+        # SECOND WIND SETUP (v40.19 Price-Dependent Structural Rule)
         second_wind_setup = False
         if len(close) >= 20:
             second_wind_setup = (close[-20] < close[-10] * 0.9)
 
         second_wind_trigger = second_wind_setup and breakout
 
-        # 💡 STEP 4：long_term_bonus廃止（score計算構造から完全に消去、固定化を根絶）
         score = (
             base_score +
-            delta_bonus +
-            streak_bonus -
+            max(delta, 0) * 0.3 +
+            streak_bonus +
+            (0.75 if second_wind_setup else 0.0) -
             ext_penalty
         )
 
-        # 💡 STEP 6：Redisの役割を限定（スコア・ストリーク補助の永続化のみ。過去ログによる補正・減衰は禁止）
         today = datetime.utcnow().strftime("%Y-%m-%d")
         if r:
-            try:
-                r.set(f"score:{ticker}", round(float(score), 2), ex=86400)
-                r.set(f"streak:{ticker}", streak, ex=86400)
-            except:
-                pass
+            last = r.get(f"last_seen:{ticker}")
+            if last == today:
+                score *= 0.95
 
         score = round(float(score), 2)
 
-        # PRIME WINDOW
+        # PRIME WINDOW (v40.19 Legacy Specification)
         idx_252d = max(-len(close), -252)
         price_252d_ago = close[idx_252d] if len(close) >= 252 else close[0]
         yearly_return = (price / price_252d_ago) - 1 if price_252d_ago else 0
@@ -235,7 +229,8 @@ def fetch(session, ticker):
             "ext": round(float(extension), 2),
             "second_wind_setup": bool(second_wind_setup),
             "second_wind_trigger": bool(second_wind_trigger),
-            "prime_window": bool(prime_window)
+            "prime_window": bool(prime_window),
+            "yearly_trend_factor": yearly_trend_factor
         }
 
     except:
@@ -254,8 +249,8 @@ def build_buy(df):
     )
 
     streak_bonus = np.minimum(
-        buy["streak"] * 0.05,
-        0.3
+        np.log1p(buy["streak"]) * 0.05,
+        0.8
     )
 
     ext_penalty = np.maximum(
@@ -263,11 +258,15 @@ def build_buy(df):
         0
     ) * 0.35
 
-    # 💡 STEP 5：BUYスコア側からもSWの加算ロジックを完全消去（純粋なスクリーニング値の減衰構造へ）
+    second_wind_bonus = (
+        buy["second_wind_setup"] * 0.9
+    )
+
     buy["buy_score"] = (
         buy["score"] +
         structure_bonus +
-        streak_bonus -
+        streak_bonus +
+        second_wind_bonus -
         ext_penalty
     ) * (1 / (1 + buy["ext"]))
 
@@ -285,11 +284,10 @@ def build_message(df):
     buy = build_buy(df)
 
     msg = []
-    # v40.20 バージョンヘッダー表記変更
-    msg.append("🚀 GrowthRadar v40.20 (Stripped Baseline Purification)") 
+    msg.append("🚀 GrowthRadar v40.19 (Baseline Specification)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    msg.append("🟢 Redis: ON (Restricted State)" if r else "🔴 Redis: OFF")
+    msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
 
     msg.append("")
     msg.append("💎 BUY SIGNAL")
@@ -334,16 +332,6 @@ def build_message(df):
     cont = df[df.phase == "CONT"].sort_values("score", ascending=False).head(4)
     if len(cont):
         for _, row in cont.iterrows():
-            msg.append(f"{row.ticker} S:{row.score:.2f}")
-    else:
-        msg.append("None")
-
-    # 💡 STEP 5：出力専用ラベルとしてのSWセクションを明示的に設置
-    msg.append("")
-    msg.append("🌊🧩 SECOND WIND SETUP (LABEL ONLY)")
-    sw_setup = df[df.second_wind_setup].sort_values("score", ascending=False).head(4)
-    if len(sw_setup):
-        for _, row in sw_setup.iterrows():
             msg.append(f"{row.ticker} S:{row.score:.2f}")
     else:
         msg.append("None")
