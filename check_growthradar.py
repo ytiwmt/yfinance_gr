@@ -256,7 +256,7 @@ def fetch(ticker):
             )
 
             # =========================
-            # REDIS TIME MODEL & ② 銘柄固定化対策
+            # REDIS TIME MODEL & 銘柄固定化対策ペナルティ
             # =========================
             delta = 0.0
             streak = 0
@@ -291,7 +291,7 @@ def fetch(ticker):
 
                 recent_high_streak = max(recent_high_streak, streak)
 
-                # ② 最近出た銘柄の抑制フィルタ (5日間のローテーション制)
+                # 過去5日以内にシグナル検出履歴がある場合のローテーションペナルティ
                 last_seen = r.get(f"last_signal:{ticker}")
                 if last_seen and last_seen != today:
                     recent_penalty = 0.3
@@ -332,37 +332,33 @@ def fetch(ticker):
                 yearly_trend_factor = 0.0
 
             # =========================
-            # SECOND WIND (v41.21 最新リファクタ)
+            # SECOND WIND (v41.22 正しい設計・責務の分離)
             # =========================
-            # ① SWW: 追加フィルタ解除・拡張窓による母集団拡大
+            # ① SWW (観測ゾーン): トレンド株を広く無条件で残す
             second_wind_watch = (
-                (recent_high_streak >= 2) and
                 (phase in ["EARLY", "TRANSITION", "CONT"]) and
-                (extension < 7.5) and   # ← 6.5 から 7.5 へ拡張
-                (delta > -0.6)          # ← -0.5 から -0.6 へ拡張
+                (extension < 8.0)
             )
 
-            # ② SWS: エントリー本体（防衛線は維持）
+            # ② SWS (エントリー本体): ここで初めて厳しい条件で精度を担保
             second_wind_setup = (
                 second_wind_watch and
-                (extension < 2.8) and
-                (extension > -1.0) and
-                (delta > -0.12) and
-                (streak >= 2)
+                (streak >= 2) and
+                (delta > -0.15) and
+                (extension < 3.0)
             )
 
-            # ③ SWT: 遅延確認
+            # ③ SWT (遅延確認): 上に抜け出た状態の検出
             second_wind_trigger = (
                 second_wind_watch and
                 breakout and
-                (extension >= 3.0) and
-                (vol_ratio > 2.0)
+                (delta > 0.0)
             )
 
-            # ③ SWWでスコア分散を入れる (0〜0.2の揺らぎノイズ)
+            # スコア分散の揺らぎノイズ (0〜0.2)
             diversity_bonus = np.random.uniform(0, 0.2) if second_wind_watch else 0.0
 
-            # クオリティおよびボーナスの算出
+            # クオリティボーナス算出
             second_wind_quality = (0.6 + 0.4 * yearly_trend_factor)
             second_wind_bonus = 0.0
             if second_wind_setup:
@@ -379,15 +375,15 @@ def fetch(ticker):
             )
             # ---------------------------------------------------------
 
-            # FINAL SCORE (ペナルティとランダム分散の統合)
+            # FINAL SCORE の決定
             score = (
                 base_score +
                 max(delta, 0) * 0.45 +
                 streak_bonus +
                 second_wind_bonus +
                 long_term_bonus +
-                diversity_bonus -     # ランダム性注入
-                recent_penalty -      # 固定化対策ペナルティ
+                diversity_bonus -
+                recent_penalty -
                 ext_penalty
             )
             score = round(float(score), 2)
@@ -443,7 +439,7 @@ def build_buy(df):
 
     buy = buy[~((buy["second_wind_setup"]) & (buy["yearly_trend_factor"] == 0))]
     
-    # ④ 上位固定化を防ぐ重複排除
+    # 銘柄の重複排除による上位固定化ブロック
     buy = buy.drop_duplicates("ticker")
     buy = buy.sort_values("buy_score", ascending=False)
 
@@ -458,7 +454,7 @@ def build_message(df):
     sw_setup = df[df.second_wind_setup]
 
     msg = []
-    msg.append("🚀 GrowthRadar v41.21") 
+    msg.append("🚀 GrowthRadar v41.22") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now(JST).strftime('%Y-%m-%d %H:%M')} JST")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -586,12 +582,11 @@ def run():
 
     df = pd.DataFrame(results)
 
-    # Redisログ永続化 & シグナル発生記録（次回のペナルティ判定用）
+    # Redisログ永続化 & 次回用シグナル記録
     today = datetime.now(JST).strftime("%Y-%m-%d")
     if r:
         for _, row in df.iterrows():
             try:
-                # ログの永続化
                 r.set(
                     f"sws_log:{row.ticker}:{today}",
                     json.dumps({
@@ -603,7 +598,6 @@ def run():
                     }),
                     ex=86400 * 14
                 )
-                # 今回SWS(セットアップ)を通過した銘柄のシグナルタイムスタンプを記録
                 if row.second_wind_setup:
                     r.set(f"last_signal:{row.ticker}", today, ex=86400 * 5)
             except:
