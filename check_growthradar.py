@@ -6,6 +6,7 @@ import redis
 import json
 import math
 from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import numpy as np
@@ -113,7 +114,7 @@ def fetch(ticker):
 
             data = data_block[0]
 
-            # 防御的パース（high も同時に取得）
+            # 防御的パース（high も取得）
             indicators = data.get("indicators", {}).get("quote", [{}])[0]
             raw_close = indicators.get("close")
             raw_volume = indicators.get("volume")
@@ -292,7 +293,7 @@ def fetch(ticker):
             price_252d_ago = close[-252]
             yearly_return = (price / (price_252d_ago + 1e-9)) - 1
 
-            # 👉 過去バイアス修正：終値(close)ではなく、日中最高値(high)ベースの52週高値へ変更
+            # high（日中最高値）ベースの52週高値
             high_52w = max(high[-252:])
             high_distance = (price / (high_52w + 1e-9)) - 1
 
@@ -428,8 +429,7 @@ def build_message(df):
     sw_setup = df[df.second_wind_setup]
 
     msg = []
-    # UPDATE v41.9 -> v41.10
-    msg.append("🚀 GrowthRadar v41.10 (PRIME WINDOW MODEL)") 
+    msg.append("🚀 GrowthRadar v41.11 (PRIME WINDOW MODEL - TRULY FINAL)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now(JST).strftime('%Y-%m-%d %H:%M')} JST")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
