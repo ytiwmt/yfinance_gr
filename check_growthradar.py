@@ -26,6 +26,14 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0"
 }
 
+# デバッグ用グローバルカウンター (①の対応用)
+reason_counter = {
+    "short": 0,
+    "price": 0,
+    "vol": 0,
+    "ok": 0
+}
+
 # ETF BLACKLIST
 ETF_BLACKLIST = {
     "QQQ", "ARKK", "SOXX", "XLF",
@@ -102,13 +110,15 @@ def load_universe():
 # FETCH
 # =========================
 def fetch(session, ticker):
+    global reason_counter
     try:
-        # 年足リターン（約252営業日前）を計算するため、取得範囲を 6mo から 1y に変更
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1y&interval=1d"
 
         res = session.get(url, timeout=5)
 
         if res.status_code != 200:
+            # APIエラーも可視化のためにカウント
+            reason_counter["short"] += 1
             return None
 
         data = res.json()["chart"]["result"][0]
@@ -116,23 +126,31 @@ def fetch(session, ticker):
         close = data["indicators"]["quote"][0]["close"]
         volume = data["indicators"]["quote"][0]["volume"]
 
-        close = [x for x in close if x is not None]
-        volume = [x for x in volume if x is not None]
+        # 【修正③】volume と close の長さズレ・インデックス崩れ対策
+        pairs = []
+        for c, v in zip(close, volume):
+            if c is not None and v is not None:
+                pairs.append((c, v))
 
-        if len(close) < 70:
+        close = [x[0] for x in pairs]
+        volume = [x[1] for x in pairs]
+
+        # 【修正①】早期リターン制限の厳格化（40.20.1準拠の120営業日判定）
+        if len(close) < 120 or len(volume) < 120:
+            reason_counter["short"] += 1
             return None
 
         price = close[-1]
 
         if price < MIN_PRICE:
+            reason_counter["price"] += 1
             return None
 
         vol_base = np.mean(volume[-20:-5])
 
-        if np.isnan(vol_base) or vol_base <= 0:
-            return None
-
-        if vol_base < MIN_VOL:
+        # 【修正①】ボリューム2段判定によるドロップ数のカウント
+        if np.isnan(vol_base) or vol_base <= 0 or vol_base < MIN_VOL:
+            reason_counter["vol"] += 1
             return None
 
         # =========================
@@ -190,9 +208,7 @@ def fetch(session, ticker):
             (close[-1] / (ma20 + 1e-9)) - 1
         ) * 10
 
-        # ---------------------------------------------------------
         # MA120 / MA200 & LONG TERM TREND BONUS
-        # ---------------------------------------------------------
         ma120 = np.mean(close[-120:]) if len(close) >= 120 else np.mean(close)
         ma200 = np.mean(close[-200:]) if len(close) >= 200 else np.mean(close)
 
@@ -204,7 +220,6 @@ def fetch(session, ticker):
         if len(close) >= 200:
             if ma120 > ma200:
                 long_term_bonus += 0.25
-        # ---------------------------------------------------------
 
         # =========================
         # BASE SCORE
@@ -238,11 +253,7 @@ def fetch(session, ticker):
             if prev_streak is not None:
                 streak = int(prev_streak)
 
-            # =========================
-            # STREAK FIX
-            # =========================
             if prev_day != today:
-
                 keep_signal = (
                     phase in ["TRANSITION", "CONT"] and
                     base_score > 0.9 and
@@ -254,24 +265,12 @@ def fetch(session, ticker):
                 else:
                     streak = 0
 
-            # =========================
-            # SAVE HIGHEST STREAK
-            # =========================
-            recent_high_streak = max(
-                recent_high_streak,
-                streak
-            )
+            recent_high_streak = max(recent_high_streak, streak)
 
-            # SAVE
             r.set(f"score:{ticker}", base_score, ex=86400)
             r.set(f"streak:{ticker}", streak, ex=86400 * 7)
             r.set(f"day:{ticker}", today, ex=86400 * 7)
-
-            r.set(
-                f"highstreak:{ticker}",
-                recent_high_streak,
-                ex=86400 * 14
-            )
+            r.set(f"highstreak:{ticker}", recent_high_streak, ex=86400 * 14)
 
         else:
             recent_high_streak = 0
@@ -288,7 +287,6 @@ def fetch(session, ticker):
 
         if extension > 3.5:
             ext_penalty = 1.0
-
         elif extension > 2.5:
             ext_penalty = 0.5
 
@@ -312,7 +310,7 @@ def fetch(session, ticker):
             yearly_trend_factor = 0.0
 
         # =========================
-        # SECOND WIND (v40.20.3)
+        # SECOND WIND (v40.20.4)
         # =========================
         second_wind_watch = (
             recent_high_streak >= 1 and
@@ -344,7 +342,6 @@ def fetch(session, ticker):
                 second_wind_quality
             )
 
-        # SWS発火ログの保存
         if r:
             r.set(
                 f"sws_log:{ticker}:{today}",
@@ -372,6 +369,9 @@ def fetch(session, ticker):
 
         score = round(float(score), 2)
 
+        # 無事通過した銘柄をカウント
+        reason_counter["ok"] += 1
+
         return {
             "ticker": ticker,
             "phase": phase,
@@ -386,7 +386,8 @@ def fetch(session, ticker):
         }
 
     except Exception as e:
-        # 例外発生時用の適切な終了処理
+        # 【修正②】握り潰していたYahoo取得・計算の失敗エラーを出力
+        print(f"❌ ERROR on {ticker}: {e}")
         return None
 
 # =========================
@@ -423,7 +424,6 @@ def build_buy(df):
         ext_penalty
     )
 
-    # FILTER LONG TERM DOWNWARD TRENDS
     buy = buy[
         ~((buy["second_wind_setup"]) & (buy["long_term_bonus"] == 0))
     ]
@@ -446,8 +446,8 @@ def build_message(df):
 
     msg = []
 
-    # ナンバリングを v40.20.3 に更新
-    msg.append("🚀 GrowthRadar v40.20.3 (SOFT SECOND WIND RANK MODEL PATCH)") 
+    # ナンバリングを v40.20.4 デバッグ強化版に更新
+    msg.append("🚀 GrowthRadar v40.20.4 (SOFT SECOND WIND RANK MODEL PATCH)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -529,12 +529,10 @@ def build_message(df):
     else:
         msg.append("None")
         
-    # DEBUG
     msg.append("")
     msg.append(f"DEBUG SWW RAW:{len(df[df.second_wind_watch])}")
     msg.append(f"DEBUG SWS RAW:{len(df[df.second_wind_setup])}")
     
-    # SECOND WIND WATCH
     msg.append("")
     msg.append("🌊👀 SECOND WIND WATCH")
 
@@ -550,7 +548,6 @@ def build_message(df):
     else:
         msg.append("None")
 
-    # SECOND WIND SETUP
     msg.append("")
     msg.append("🌊🧩 SECOND WIND SETUP")
 
@@ -566,7 +563,6 @@ def build_message(df):
     else:
         msg.append("None")
 
-    # SECOND WIND TRIGGER
     msg.append("")
     msg.append("🌊🔥 SECOND WIND TRIGGER")
 
@@ -597,6 +593,10 @@ def run():
 
     universe = load_universe()
 
+    # 【修正④】universe 取得の生存確認ログ
+    print(f"📊 UNIVERSE SIZE: {len(universe)}")
+    print(f"📋 UNIVERSE SAMPLE (FIRST 10): {universe[:10]}")
+
     results = []
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
@@ -610,8 +610,16 @@ def run():
             if rlt:
                 results.append(rlt)
 
+    # 【修正①】フィルタリング結果をコンソールに一覧出力
+    print("\n📉 --- DROP REASON COUNTERS ---")
+    print(f" short (Insufficient data/API error) : {reason_counter['short']}")
+    print(f" price (Under MIN_PRICE)             : {reason_counter['price']}")
+    print(f" vol   (Under MIN_VOL/NaN base)       : {reason_counter['vol']}")
+    print(f" ok    (Successfully Passed)          : {reason_counter['ok']}")
+    print("--------------------------------\n")
+
     if not results:
-        print("NO DATA")
+        print("⚠️ NO DATA: All tickers were dropped or failed.")
         return
 
     df = pd.DataFrame(results)
