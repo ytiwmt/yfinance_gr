@@ -314,20 +314,22 @@ def fetch(session, ticker):
             yearly_trend_factor = 0.0
 
         # =========================
-        # SECOND WIND (UPDATE v40.20)
+        # SECOND WIND (UPDATE v40.20.1 - ADJUSTED)
         # =========================
+        # 【修正①】さらに条件を広げ、過去に1日でもシグナルがあればWatch対象にする
         second_wind_watch = (
-            recent_high_streak >= 3 and
-            streak <= 4 and
+            recent_high_streak >= 1 and
+            streak <= 5 and
             phase in ["TRANSITION", "CONT", "EARLY"] and
-            extension < 5.0 and
-            delta > -0.3
+            extension < 4.0 and
+            delta > -0.35
         )
 
+        # 【修正②】Watch通過＋軽い収縮
         second_wind_setup = (
             second_wind_watch and
-            extension < 3 and
-            delta > -0.15
+            extension < 2.2 and
+            delta > -0.20
         )
 
         second_wind_trigger = (
@@ -339,10 +341,11 @@ def fetch(session, ticker):
             0.6 + 0.4 * yearly_trend_factor
         )
 
+        # 【修正③】ランキング支配を防ぐため加点をマイルドに設定
         second_wind_bonus = 0.0
         if second_wind_setup:
             second_wind_bonus = (
-                0.75 *
+                0.45 *
                 second_wind_quality
             )
         # ---------------------------------------------------------
@@ -464,8 +467,8 @@ def build_message(df):
 
     msg = []
 
-    # UPDATE v40.20: バージョン名の変更
-    msg.append("🚀 GrowthRadar v40.20 (SOFT SECOND WIND RANK MODEL)") 
+    # バージョン名をパッチ版に固定
+    msg.append("🚀 GrowthRadar v40.20.1 (SOFT SECOND WIND RANK MODEL PATCH)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
@@ -640,11 +643,11 @@ def run():
             if rlt:
                 results.append(rlt)
 
-    if not results:
+    if not Outer_Results := results:
         print("NO DATA")
         return
 
-    df = pd.DataFrame(results)
+    df = pd.DataFrame(Outer_Results)
 
     text = build_message(df)
 
