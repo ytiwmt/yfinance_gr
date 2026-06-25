@@ -224,9 +224,14 @@ def fetch(session, ticker):
         if price > ma200:
             long_term_bonus += 0.25
 
-        if len(close) >= 200:
-            if ma120 > ma200:
-                long_term_bonus += 0.25
+        if ma120 > ma200:
+            long_term_bonus += 0.25
+
+        if len(close) >= 180:
+            old_ma120 = np.mean(close[-180:-60])
+
+        if ma120 > old_ma120:
+            long_term_bonus += 0.25
 
         # =========================
         # BASE SCORE
@@ -455,7 +460,7 @@ def build_message(df):
 
     msg = []
 
-    msg.append("🚀 GrowthRadar v40.20.5 (SOFT SECOND WIND RANK MODEL PATCH)") 
+    msg.append("🚀 GrowthRadar v42.0 (SOFT ROTATION ARCHITECTURE)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
