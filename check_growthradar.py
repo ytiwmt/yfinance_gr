@@ -309,21 +309,26 @@ def fetch(session, ticker):
         # =========================
         # LONG TERM TREND VALIDATION MODEL
         # =========================
-        idx_252d = max(-len(close), -252)
-        price_252d_ago = close[idx_252d]
-        yearly_return = (price / price_252d_ago) - 1 if price_252d_ago else 0
+        ma120 = np.mean(close[-120:]) if len(close) >= 120 else np.mean(close)
+        ma200 = np.mean(close[-200:]) if len(close) >= 200 else np.mean(close)
 
-        high_52w = max(close)
-        high_distance = (price / high_52w) - 1
+        long_term_bonus = 0.0
 
-        if yearly_return > 0.3 and high_distance > -0.25:
-            yearly_trend_factor = 1.0
-        elif yearly_return > -0.2 and high_distance > -0.4:
-            yearly_trend_factor = 0.5
-        elif yearly_return > -0.45 and high_distance > -0.65:
-            yearly_trend_factor = 0.25
-        else:
-            yearly_trend_factor = 0.0
+        # 現在位置
+        if price > ma200:
+            long_term_bonus += 0.25
+
+        # 中期＞長期
+        if len(close) >= 200:
+            if ma120 > ma200:
+                long_term_bonus += 0.25
+
+        # ←追加（中期線そのものが上向きか）
+        if len(close) >= 180:
+            old_ma120 = np.mean(close[-180:-60])
+
+        if ma120 > old_ma120:
+            long_term_bonus += 0.25
 
         # =========================
         # SECOND WIND
@@ -460,7 +465,7 @@ def build_message(df):
 
     msg = []
 
-    msg.append("🚀 GrowthRadar v42.0 (SOFT ROTATION ARCHITECTURE)") 
+    msg.append("🚀 GrowthRadar v42.1 (SOFT ROTATION ARCHITECTURE)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
