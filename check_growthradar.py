@@ -353,7 +353,9 @@ def fetch(session, ticker):
         )
 
         second_wind_quality = (
-            0.6 + 0.4 * yearly_trend_factor
+            0.6 + 0.4 * (
+                long_term_bonus / 0.75
+            )
         )
 
         second_wind_bonus = 0.0
