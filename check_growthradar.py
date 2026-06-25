@@ -41,7 +41,7 @@ ETF_BLACKLIST = {
     "TQQQ", "SQQQ", "RGTX","IONX",
     "SOXL", "SOXS", "ORCX","DLLL",
     "ARKW", "ARKG", "QCMU","NBIL",
-    "AMDL", "IONL", "NBIG", "MVLL",
+    "AMDL", "IONL", "NBIG", "MVLL", "MULL",
     "SMH", "IGV", "BOTZ", "TAN", "ARMG"
 }
 
