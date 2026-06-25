@@ -113,9 +113,6 @@ def load_universe():
 
     symbols = sorted(symbols)
 
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    random.seed(today)
-
     symbols = list(symbols)
     random.shuffle(symbols)
 
