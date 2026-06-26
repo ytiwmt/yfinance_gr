@@ -433,15 +433,10 @@ def build_buy(df):
         0
     ) * 0.35
 
-    second_wind_bonus = (
-        buy["second_wind_setup"] * 0.9
-    )
-
     buy["buy_score"] = (
         buy["score"] +
         structure_bonus +
-        streak_bonus +
-        second_wind_bonus -
+        streak_bonus -
         ext_penalty
     )
 
@@ -467,7 +462,7 @@ def build_message(df):
 
     msg = []
 
-    msg.append("🚀 GrowthRadar v42.1 (SOFT ROTATION ARCHITECTURE)") 
+    msg.append("🚀 GrowthRadar v42.2 (SOFT ROTATION ARCHITECTURE)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
