@@ -252,14 +252,24 @@ def fetch(session, ticker):
         today = datetime.utcnow().strftime("%Y-%m-%d")
 
         if r:
-            prev_score = r.get(f"score:{ticker}")
-            prev_streak = r.get(f"streak:{ticker}")
-            prev_day = r.get(f"day:{ticker}")
+            # 置換箇所①：GET×4 → MGET×1
+            (
+                prev_score,
+                prev_streak,
+                prev_day,
+                recent_high_streak
+            ) = r.mget([
+                f"score:{ticker}",
+                f"streak:{ticker}",
+                f"day:{ticker}",
+                f"highstreak:{ticker}"
+            ])
 
-            recent_high_streak = r.get(f"highstreak:{ticker}")
-            
-            # 置換箇所①：recent_high_streak の安全変換
-            recent_high_streak = int(safe_float(recent_high_streak)) if recent_high_streak else 0
+            recent_high_streak = (
+                int(safe_float(recent_high_streak))
+                if recent_high_streak
+                else 0
+            )
 
             # 置換箇所②：delta 計算時の safe_float 適用
             if prev_score is not None:
@@ -366,18 +376,7 @@ def fetch(session, ticker):
                 second_wind_quality
             )
 
-        if r:
-            r.set(
-                f"sws_log:{ticker}:{today}",
-                json.dumps({
-                    "extension": extension,
-                    "streak": streak,
-                    "delta": delta,
-                    "phase": phase,
-                    "hit": bool(second_wind_setup)
-                }),
-                ex=86400 * 14
-            )
+        # sws_log disabled
 
         # =========================
         # FINAL SCORE
