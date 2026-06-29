@@ -227,7 +227,6 @@ def fetch(session, ticker):
         if ma120 > ma200:
             long_term_bonus += 0.25
 
-        # 置換箇所①：old_ma120 の安全な初期化と判定
         old_ma120 = None
 
         if len(close) >= 180:
@@ -247,7 +246,7 @@ def fetch(session, ticker):
         )
 
         # =========================
-        # REDIS TIME MODEL (🔄 UPDATE: SAFE CAST)
+        # REDIS TIME MODEL (🔄 UPDATE: HASH MODEL)
         # =========================
         delta = 0.0
         streak = 0
@@ -255,17 +254,13 @@ def fetch(session, ticker):
         today = datetime.utcnow().strftime("%Y-%m-%d")
 
         if r:
-            (
-                prev_score,
-                prev_streak,
-                prev_day,
-                recent_high_streak
-            ) = r.mget([
-                f"score:{ticker}",
-                f"streak:{ticker}",
-                f"day:{ticker}",
-                f"highstreak:{ticker}"
-            ])
+            # 置換箇所②：MGETをやめてHGETALLに寄せる
+            state_data = r.hgetall(f"state:{ticker}")
+            
+            prev_score = state_data.get("score")
+            prev_streak = state_data.get("streak")
+            prev_day = state_data.get("day")
+            recent_high_streak = state_data.get("highstreak")
 
             recent_high_streak = (
                 int(safe_float(recent_high_streak))
@@ -293,10 +288,15 @@ def fetch(session, ticker):
 
             recent_high_streak = max(recent_high_streak, streak)
 
-            r.set(f"score:{ticker}", base_score, ex=86400)
-            r.set(f"streak:{ticker}", streak, ex=86400 * 7)
-            r.set(f"day:{ticker}", today, ex=86400 * 7)
-            r.set(f"highstreak:{ticker}", recent_high_streak, ex=86400 * 14)
+            # 置換箇所①：HSETにまとめる
+            r.hset(f"state:{ticker}", mapping={
+                "score": base_score,
+                "streak": streak,
+                "day": today,
+                "highstreak": recent_high_streak
+            })
+            # ハッシュキー自体の有効期限を設定（最長14日間に合わせる）
+            r.expire(f"state:{ticker}", 86400 * 14)
 
         else:
             recent_high_streak = 0
@@ -333,7 +333,6 @@ def fetch(session, ticker):
             if ma120 > ma200:
                 long_term_bonus += 0.25
 
-        # 置換箇所②（上記と同様の安全処理をここにも適用）
         old_ma120 = None
 
         if len(close) >= 180:
@@ -464,8 +463,7 @@ def build_message(df):
 
     msg = []
 
-    # 置換箇所③：バージョンを v42.5 に更新
-    msg.append("🚀 GrowthRadar v42.5 (SOFT ROTATION ARCHITECTURE)") 
+    msg.append("🚀 GrowthRadar v42.6 (SOFT ROTATION ARCHITECTURE)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
