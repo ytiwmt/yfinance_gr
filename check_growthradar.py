@@ -254,10 +254,10 @@ def fetch(session, ticker):
         today = datetime.utcnow().strftime("%Y-%m-%d")
 
         if r:
+            # 置換箇所②：MGETをやめてHGETALLに寄せる
             state_data = r.hgetall(f"state:{ticker}")
             
-            # 置換箇所①：新規登録モデルへのアップデート
-            prev_score = safe_float(state_data.get("score"))
+            prev_score = state_data.get("score")
             prev_streak = state_data.get("streak")
             prev_day = state_data.get("day")
             recent_high_streak = state_data.get("highstreak")
@@ -268,8 +268,8 @@ def fetch(session, ticker):
                 else 0
             )
 
-            if state_data.get("score") is not None:
-                delta = base_score - prev_score
+            if prev_score is not None:
+                delta = base_score - safe_float(prev_score)
 
             if prev_streak is not None:
                 streak = int(safe_float(prev_streak))
@@ -288,20 +288,15 @@ def fetch(session, ticker):
 
             recent_high_streak = max(recent_high_streak, streak)
 
-            # 置換箇所②：新規か変動時のみアップデート
-            if prev_score == 0:
-                should_update = True
-            else:
-                should_update = abs(base_score - prev_score) > 0.05
-
-            if should_update:
-                r.hset(f"state:{ticker}", mapping={
-                    "score": base_score,
-                    "streak": streak,
-                    "day": today,
-                    "highstreak": recent_high_streak
-                })
-                r.expire(f"state:{ticker}", 86400 * 14)
+            # 置換箇所①：HSETにまとめる
+            r.hset(f"state:{ticker}", mapping={
+                "score": base_score,
+                "streak": streak,
+                "day": today,
+                "highstreak": recent_high_streak
+            })
+            # ハッシュキー自体の有効期限を設定（最長14日間に合わせる）
+            r.expire(f"state:{ticker}", 86400 * 14)
 
         else:
             recent_high_streak = 0
@@ -468,8 +463,7 @@ def build_message(df):
 
     msg = []
 
-    # バージョンを v42.8 に更新
-    msg.append("🚀 GrowthRadar v42.8 (SOFT ROTATION ARCHITECTURE)") 
+    msg.append("🚀 GrowthRadar v42.6 (SOFT ROTATION ARCHITECTURE)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
