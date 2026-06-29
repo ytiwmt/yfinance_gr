@@ -227,10 +227,13 @@ def fetch(session, ticker):
         if ma120 > ma200:
             long_term_bonus += 0.25
 
+        # 置換箇所①：old_ma120 の安全な初期化と判定
+        old_ma120 = None
+
         if len(close) >= 180:
             old_ma120 = np.mean(close[-180:-60])
 
-        if ma120 > old_ma120:
+        if old_ma120 is not None and ma120 > old_ma120:
             long_term_bonus += 0.25
 
         # =========================
@@ -252,7 +255,6 @@ def fetch(session, ticker):
         today = datetime.utcnow().strftime("%Y-%m-%d")
 
         if r:
-            # 置換箇所①：GET×4 → MGET×1
             (
                 prev_score,
                 prev_streak,
@@ -271,11 +273,9 @@ def fetch(session, ticker):
                 else 0
             )
 
-            # 置換箇所②：delta 計算時の safe_float 適用
             if prev_score is not None:
                 delta = base_score - safe_float(prev_score)
 
-            # 置換箇所③：streak の安全変換
             if prev_streak is not None:
                 streak = int(safe_float(prev_streak))
 
@@ -333,11 +333,13 @@ def fetch(session, ticker):
             if ma120 > ma200:
                 long_term_bonus += 0.25
 
-        # ←追加（中期線そのものが上向きか）
+        # 置換箇所②（上記と同様の安全処理をここにも適用）
+        old_ma120 = None
+
         if len(close) >= 180:
             old_ma120 = np.mean(close[-180:-60])
 
-        if ma120 > old_ma120:
+        if old_ma120 is not None and ma120 > old_ma120:
             long_term_bonus += 0.25
 
         # =========================
@@ -462,7 +464,8 @@ def build_message(df):
 
     msg = []
 
-    msg.append("🚀 GrowthRadar v42.3 (SOFT ROTATION ARCHITECTURE)") 
+    # 置換箇所③：バージョンを v42.5 に更新
+    msg.append("🚀 GrowthRadar v42.5 (SOFT ROTATION ARCHITECTURE)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
