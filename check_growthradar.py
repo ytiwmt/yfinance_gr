@@ -316,7 +316,11 @@ def fetch(session, ticker):
         # =========================
         ext_penalty = 0.0
 
-        if extension > 3.5:
+        if extension > 8:
+            ext_penalty = 5.0
+        elif extension > 5:
+            ext_penalty = 2.0
+        elif extension > 3.5:
             ext_penalty = 1.0
         elif extension > 2.5:
             ext_penalty = 0.5
@@ -359,9 +363,8 @@ def fetch(session, ticker):
 
         second_wind_setup = (
             second_wind_watch and
-             -1.5 < extension < 2.2 and
-            delta > -0.2 and 
-            yearly_trend_factor >= 0.5
+            extension < 2.8 and
+            delta > -0.25
         )
 
         second_wind_trigger = (
@@ -468,8 +471,8 @@ def build_message(df):
 
     msg = []
 
-    # バージョンを v42.8 に更新
-    msg.append("🚀 GrowthRadar v42.8 (SOFT ROTATION ARCHITECTURE)") 
+    # バージョンを v42.9 に更新
+    msg.append("🚀 GrowthRadar v42.9 (SOFT ROTATION ARCHITECTURE)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
