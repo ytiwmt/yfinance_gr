@@ -358,7 +358,8 @@ def fetch(session, ticker):
             streak <= 5 and
             phase in ["TRANSITION", "CONT", "EARLY"] and
             extension < 4.0 and
-            delta > -0.35
+            delta > -0.35 and
+            long_term_bonus >= 0.5
         )
 
         second_wind_setup = (
@@ -472,8 +473,8 @@ def build_message(df):
 
     msg = []
 
-    # バージョンを v42.9 に更新
-    msg.append("🚀 GrowthRadar v42.9 (SOFT ROTATION ARCHITECTURE)") 
+    # バージョンを v42.10 に更新
+    msg.append("🚀 GrowthRadar v42.10 (SOFT ROTATION ARCHITECTURE)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
