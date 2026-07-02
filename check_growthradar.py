@@ -363,8 +363,8 @@ def fetch(session, ticker):
 
         second_wind_setup = (
             second_wind_watch and
-            extension < 2.8 and
-            delta > -0.25
+            extension < 2.4 and
+            delta > -0.20
         )
 
         second_wind_trigger = (
