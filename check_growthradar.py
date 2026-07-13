@@ -347,7 +347,11 @@ def fetch(session, ticker):
         if len(close) >= 180:
             old_ma120 = np.mean(close[-180:-60])
 
-        if old_ma120 is not None and ma120 > old_ma120:
+        if (
+            old_ma120 is not None
+            and ma120 > old_ma120
+            and ma200 >= old_ma200
+        ):
             long_term_bonus += 0.25
 
         # =========================
@@ -474,8 +478,8 @@ def build_message(df):
 
     msg = []
 
-    # バージョンを v42.10 に更新 -> v42.11
-    msg.append("🚀 GrowthRadar v42.11 (SOFT ROTATION ARCHITECTURE)") 
+    # バージョンを v42.14 に更新 -> v42.14
+    msg.append("🚀 GrowthRadar v42.14 (SOFT ROTATION ARCHITECTURE)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
