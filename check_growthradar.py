@@ -216,6 +216,9 @@ def fetch(session, ticker):
             (close[-1] / (ma20 + 1e-9)) - 1
         ) * 10
 
+        high52 = max(close[-252:]) if len(close) >= 252 else max(close)
+        drawdown = close[-1] / high52 - 1
+
         ma120 = np.mean(close[-120:]) if len(close) >= 120 else np.mean(close)
         ma200 = np.mean(close[-200:]) if len(close) >= 200 else np.mean(close)
 
@@ -367,7 +370,8 @@ def fetch(session, ticker):
             0.5 < extension < 2.0 and
             delta > -0.05 and
             not breakout and
-            long_term_bonus >= 0.75
+            long_term_bonus >= 0.75 and
+            drawdown > -0.40
         )
 
         second_wind_trigger = (
@@ -474,8 +478,8 @@ def build_message(df):
 
     msg = []
 
-    # バージョンを v42.10 に更新 -> v42.11
-    msg.append("🚀 GrowthRadar v42.11 (SOFT ROTATION ARCHITECTURE)") 
+    # バージョンを v42.11 から v42.15 に更新
+    msg.append("🚀 GrowthRadar v42.15 (SOFT ROTATION ARCHITECTURE)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
