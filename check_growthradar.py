@@ -371,8 +371,7 @@ def fetch(session, ticker):
             delta > -0.05 and
             not breakout and
             long_term_bonus >= 0.75 and
-            drawdown > -0.40 and
-            not second_wind_trigger
+            drawdown > -0.40
         )
 
         second_wind_trigger = (
