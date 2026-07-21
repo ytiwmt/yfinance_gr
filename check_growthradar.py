@@ -365,20 +365,20 @@ def fetch(session, ticker):
             long_term_bonus >= 0.5
         )
 
+        second_wind_trigger = (
+            second_wind_watch and
+            extension >= 1.8 and
+            delta > 0
+        )
+
         second_wind_setup = (
             second_wind_watch and
-            0.5 < extension < 2.0 and
+            0.5 <= extension < 1.8 and
             delta > -0.05 and
             not breakout and
             long_term_bonus >= 0.75 and
             drawdown > -0.40 and
             not second_wind_trigger
-        )
-
-        second_wind_trigger = (
-            second_wind_watch and
-            extension >= 1.8 and
-            delta > 0 
         )
 
         second_wind_quality = (
@@ -480,8 +480,7 @@ def build_message(df):
 
     msg = []
 
-    # バージョンを v42.11 から v42.16 に更新
-    msg.append("🚀 GrowthRadar v42.16 (SOFT ROTATION ARCHITECTURE)") 
+    msg.append("🚀 GrowthRadar v42.17 (SOFT ROTATION ARCHITECTURE)") 
     msg.append(f"Scan:{SCAN_SIZE} Valid:{len(df)}")
     msg.append(f"Time:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     msg.append("🟢 Redis: ON" if r else "🔴 Redis: OFF")
